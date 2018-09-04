@@ -25,6 +25,7 @@ proto_dhcp_init_config() {
 	proto_config_add_string mtu6rd
 	proto_config_add_string customroutes
 	proto_config_add_boolean classlessroute
+	proto_config_add_string 'alias'
 }
 
 proto_dhcp_add_sendopts() {
@@ -35,8 +36,8 @@ proto_dhcp_setup() {
 	local config="$1"
 	local iface="$2"
 
-	local ipaddr hostname clientid vendorid broadcast norelease reqopts defaultreqopts iface6rd sendopts delegate zone6rd zone mtu6rd customroutes classlessroute
-	json_get_vars ipaddr hostname clientid vendorid broadcast norelease reqopts defaultreqopts iface6rd delegate zone6rd zone mtu6rd customroutes classlessroute
+	local ipaddr hostname clientid vendorid broadcast release reqopts defaultreqopts iface6rd sendopts delegate zone6rd zone mtu6rd customroutes classlessroute alias
+	json_get_vars ipaddr hostname clientid vendorid broadcast release reqopts defaultreqopts iface6rd delegate zone6rd zone mtu6rd customroutes classlessroute alias
 
 	local opt dhcpopts
 	for opt in $reqopts; do
@@ -61,6 +62,12 @@ proto_dhcp_setup() {
 	[ "$delegate" = "0" ] && proto_export "IFACE6RD_DELEGATE=0"
 	# Request classless route option (see RFC 3442) by default
 	[ "$classlessroute" = "0" ] || append dhcpopts "-O 121"
+
+	proto_export "ALIAS=$alias"
+	local i
+	for i in $alias; do
+		ubus call network.interface."$i" up '{}'
+	done
 
 	proto_export "INTERFACE=$config"
 	proto_run_command "$config" udhcpc \
