@@ -375,6 +375,19 @@ hostapd_common_add_bss_config() {
 	config_add_int eap_server
 	config_add_string eap_user_file ca_cert server_cert private_key private_key_passwd server_id
 
+	config_add_boolean hotspot20
+	config_add_int access_network_type venue_group venue_type
+	config_add_boolean internet asra esr uesa dgaf
+	config_add_string hessid ipaddr_type_availability wan_metrics
+	config_add_array venue_name
+	config_add_array roaming_consortium
+	config_add_array nai_realm
+	config_add_array domain_name
+	config_add_array 3gpp_cell_net
+	config_add_array oper_friendly_name
+	config_add_array conn_capab
+	config_add_array operating_class
+
 	config_add_boolean fils
 	config_add_string fils_dhcp
 }
@@ -545,8 +558,8 @@ hostapd_set_bss_options() {
 		wps_independent wps_device_type wps_device_name wps_manufacturer wps_pin \
 		macfilter ssid utf8_ssid wmm uapsd hidden short_preamble rsn_preauth \
 		iapp_interface eapol_version dynamic_vlan ieee80211w nasid \
-		acct_server acct_secret acct_port acct_interval \
-		bss_load_update_period chan_util_avg_period sae_require_mfp sae_pwe \
+		acct_server acct_secret acct_port acct_interval ubus_acct_interval \
+		bss_load_update_period chan_util_avg_period sae_require_mfp device uuid hotspot20 \
 		multi_ap multi_ap_backhaul_ssid multi_ap_backhaul_key skip_inactivity_poll \
 		airtime_bss_weight airtime_bss_limit airtime_sta_weight \
 		multicast_to_unicast_all proxy_arp per_sta_vif \
@@ -567,6 +580,7 @@ hostapd_set_bss_options() {
 	set_default tdls_prohibit 0
 	set_default eapol_version $((wpa & 1))
 	set_default acct_port 1813
+	set_default hotspot20 0
 	set_default bss_load_update_period 60
 	set_default chan_util_avg_period 600
 	set_default utf8_ssid 1
@@ -608,7 +622,7 @@ hostapd_set_bss_options() {
 
 	[ "$wpa" -gt 0 ] && {
 		[ -n "$wpa_group_rekey"  ] && append bss_conf "wpa_group_rekey=$wpa_group_rekey" "$N"
-		[ -n "$wpa_pair_rekey"   ] && append bss_conf "wpa_ptk_rekey=$wpa_pair_rekey"    "$N"
+		[ -n "$wpa_pair_rekey"   ] && append bss_conf "wpa_ptk_rekey=$wpa_pair_rekey"	"$N"
 		[ -n "$wpa_master_rekey" ] && append bss_conf "wpa_gmk_rekey=$wpa_master_rekey"  "$N"
 		[ -n "$wpa_strict_rekey" ] && append bss_conf "wpa_strict_rekey=$wpa_strict_rekey" "$N"
 	}
@@ -1042,6 +1056,109 @@ hostapd_set_bss_options() {
 		}
 	}
 
+	if [ "$hotspot20" -gt 0 ]; then
+		json_get_vars access_network_type internet asra esr uesa \
+			venue_group venue_type hessid ipaddr_type_availability dgaf \
+			wan_metrics
+		json_get_values roaming_consortium roaming_consortium
+		json_get_values domain_names domain_name
+		json_get_values cell_nets 3gpp_cell_net
+		json_get_values realms nai_realm
+		json_get_values conn_capabs conn_capab
+		json_get_values oper_class operating_class
+
+		set_default access_network_type 0
+		set_default internet 1
+		set_default asra 0
+		set_default esr 0
+		set_default uesa 0
+		set_default venue_group 0
+		set_default venue_type 0
+		set_default dgaf 0
+
+		append bss_conf "interworking=1" "$N"
+		append bss_conf "access_network_type=$access_network_type" "$N"
+		append bss_conf "internet=$internet" "$N"
+		append bss_conf "asra=$asra" "$N"
+		append bss_conf "esr=$esr" "$N"
+		append bss_conf "uesa=$uesa" "$N"
+		append bss_conf "venue_group=$venue_group" "$N"
+		append bss_conf "venue_type=$venue_type" "$N"
+
+        local i rc vn dn cn realm nm conn_capab
+
+		[ -n "$hessid" ] && append bss_conf "hessid=$hessid" "$N"
+
+		for rc in $roaming_consortium; do
+			append bss_conf "roaming_consortium=$rc" "$N"
+		done
+
+        #do not use json_get_values here, because of spaces
+		json_select venue_name && {
+            i=1
+            while json_get_var vn $i; do
+                append bss_conf "venue_name=$vn" "$N"
+                i=$(( i + 1))
+		    done
+            json_select ..
+        }
+
+		[ -n "$ipaddr_type_availability" ] && append bss_conf \
+			"ipaddr_type_availability=$ipaddr_type_availability" "$N"
+
+		for dn in $domain_names; do
+			if [ -n "$domain_name" ]; then
+				domain_name="$domain_name,$dn"
+			else
+				domain_name="$dn"
+			fi
+		done
+		[ -n "$domain_name" ] && append bss_conf "domain_name=$domain_name" "$N"
+
+		for cn in $cell_nets; do
+			echo $cn | grep -q \
+				'^[^0-9]*\([0-9]\{1,3\}\)[^0-9]\+\([0-9]\{1,3\}\)[^0-9]*$' || \
+				continue
+			cn="$(echo $cn | sed \
+				's/^[^0-9]*\([0-9]\{1,3\}\)[^0-9]\+\([0-9]\{1,3\}\)[^0-9]*$/\1,\2/')"
+			if [ -n "$cell_net" ]; then
+				cell_net="$cell_net;$cn"
+			else
+				cell_net="$cn"
+			fi
+		done
+		[ -n "$cell_net" ] && append bss_conf "anqp_3gpp_cell_net=$cell_net" "$N"
+
+		for realm in $realms; do
+			append bss_conf "nai_realm=$realm" "$N"
+		done
+
+		append bss_conf "hs20=1" "$N"
+
+		append bss_conf "disable_dgaf=$(if [ "$dgaf" == 1 ]; then \
+			echo 0; else echo 1; fi)" "$N"
+
+        #do not use json_get_values here, because of spaces
+		json_select oper_friendly_name && {
+            i=1
+            while json_get_var nm $i; do
+			    append bss_conf "hs20_oper_friendly_name=$nm" "$N"
+                i=$(( i + 1))
+		    done
+            json_select ..
+        }
+
+		for conn_capab in $conn_capabs; do
+			append bss_conf "hs20_conn_capab=$conn_capab" "$N"
+		done
+
+		[ -n "$wan_metrics" ] && \
+			append bss_conf "hs20_wan_metrics=$wan_metrics" "$N"
+
+		[ -n "$oper_class" ] && append bss_conf \
+			"hs20_operating_class=${oper_class//[[:blank:]]/}" "$N"
+	fi
+
 	json_get_vars iw_enabled iw_internet iw_asra iw_esr iw_uesa iw_access_network_type
 	json_get_vars iw_hessid iw_venue_group iw_venue_type iw_network_auth_type
 	json_get_vars iw_roaming_consortium iw_domain_name iw_anqp_3gpp_cell_net iw_nai_realm
@@ -1173,7 +1290,7 @@ hostapd_set_log_options() {
 	set_default log_80211  1
 	set_default log_8021x  1
 	set_default log_radius 1
-	set_default log_wpa    1
+	set_default log_wpa	1
 	set_default log_driver 1
 	set_default log_iapp   1
 	set_default log_mlme   1
@@ -1182,7 +1299,7 @@ hostapd_set_log_options() {
 		($log_80211  << 0) | \
 		($log_8021x  << 1) | \
 		($log_radius << 2) | \
-		($log_wpa    << 3) | \
+		($log_wpa	<< 3) | \
 		($log_driver << 4) | \
 		($log_iapp   << 5) | \
 		($log_mlme   << 6)   \
