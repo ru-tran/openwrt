@@ -751,7 +751,7 @@ hostapd_set_bss_options() {
 			set_default dae_port 3799
 			set_default request_cui 0
 
-			[ "$eap_server" -eq 0 ] && {
+			[ "$eap_server" -eq 0 ] && [ -n "$auth_server" ] && [ -n "$auth_secret" ]  && {
 				append bss_conf "auth_server_addr=$auth_server" "$N"
 				append bss_conf "auth_server_port=$auth_port" "$N"
 				append bss_conf "auth_server_shared_secret=$auth_secret" "$N"
