@@ -158,13 +158,89 @@ hostapd_iface_get_bss(struct ubus_context *ctx, struct ubus_object *obj,
 
 	return 0;
 }
+
+
+#ifdef NEED_AP_MLME
+enum {
+	CSA_FREQ,
+	CSA_BCN_COUNT,
+	CSA_CENTER_FREQ1,
+	CSA_CENTER_FREQ2,
+	CSA_BANDWIDTH,
+	CSA_SEC_CHANNEL_OFFSET,
+	CSA_HT,
+	CSA_VHT,
+	CSA_BLOCK_TX,
+	__CSA_MAX
+};
+
+static const struct blobmsg_policy csa_policy[__CSA_MAX] = {
+	[CSA_FREQ] = { "freq", BLOBMSG_TYPE_INT32 },
+	[CSA_BCN_COUNT] = { "bcn_count", BLOBMSG_TYPE_INT32 },
+	[CSA_CENTER_FREQ1] = { "center_freq1", BLOBMSG_TYPE_INT32 },
+	[CSA_CENTER_FREQ2] = { "center_freq2", BLOBMSG_TYPE_INT32 },
+	[CSA_BANDWIDTH] = { "bandwidth", BLOBMSG_TYPE_INT32 },
+	[CSA_SEC_CHANNEL_OFFSET] = { "sec_channel_offset", BLOBMSG_TYPE_INT32 },
+	[CSA_HT] = { "ht", BLOBMSG_TYPE_BOOL },
+	[CSA_VHT] = { "vht", BLOBMSG_TYPE_BOOL },
+	[CSA_BLOCK_TX] = { "block_tx", BLOBMSG_TYPE_BOOL },
+};
+
+static int
+hostapd_switch_chan(struct hostapd_data *hapd, struct blob_attr *msg)
+{
+	struct blob_attr *tb[__CSA_MAX];
+	struct csa_settings css;
+
+	blobmsg_parse(csa_policy, __CSA_MAX, tb, blob_data(msg), blob_len(msg));
+
+	if (!tb[CSA_FREQ])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	memset(&css, 0, sizeof(css));
+	css.freq_params.freq = blobmsg_get_u32(tb[CSA_FREQ]);
+
+#define SET_CSA_SETTING(name, field, type) \
+	do { \
+		if (tb[name]) \
+			css.field = blobmsg_get_ ## type(tb[name]); \
+	} while(0)
+
+	SET_CSA_SETTING(CSA_BCN_COUNT, cs_count, u32);
+	SET_CSA_SETTING(CSA_CENTER_FREQ1, freq_params.center_freq1, u32);
+	SET_CSA_SETTING(CSA_CENTER_FREQ2, freq_params.center_freq2, u32);
+	SET_CSA_SETTING(CSA_BANDWIDTH, freq_params.bandwidth, u32);
+	SET_CSA_SETTING(CSA_SEC_CHANNEL_OFFSET, freq_params.sec_channel_offset, u32);
+	SET_CSA_SETTING(CSA_HT, freq_params.ht_enabled, bool);
+	SET_CSA_SETTING(CSA_VHT, freq_params.vht_enabled, bool);
+	SET_CSA_SETTING(CSA_BLOCK_TX, block_tx, bool);
+
+
+	if (hostapd_switch_channel(hapd, &css) != 0)
+		return UBUS_STATUS_NOT_SUPPORTED;
+	return UBUS_STATUS_OK;
+#undef SET_CSA_SETTING
+}
+
+static int
+hostapd_iface_switch_chan(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct hostapd_iface *iface = container_of(obj, struct hostapd_iface,
+			ubus.obj);
+	if (iface && iface->bss[0])
+		return hostapd_switch_chan(iface->bss[0], msg);
+	return UBUS_STATUS_INVALID_ARGUMENT;
+}
+#endif
+
 static const struct ubus_method iface_methods[] = {
-	//UBUS_METHOD_NOARG("get_state", hostapd_iface_get_state),
-	//UBUS_METHOD_NOARG("get_bss", hostapd_iface_get_bss),
-
-	{ .name = "get_state", .handler = hostapd_iface_get_state },
-	{ .name = "get_bss", .handler = hostapd_iface_get_bss },
-
+	UBUS_METHOD_NOARG("get_state", hostapd_iface_get_state),
+	UBUS_METHOD_NOARG("get_bss", hostapd_iface_get_bss),
+	#ifdef NEED_AP_MLME
+		UBUS_METHOD("switch_chan", hostapd_iface_switch_chan, csa_policy),
+	#endif
 };
 static struct ubus_object_type iface_object_type =
 	UBUS_OBJECT_TYPE("hostapd_iface", iface_methods);
@@ -870,35 +946,6 @@ hostapd_config_remove(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
-enum {
-	CSA_FREQ,
-	CSA_BCN_COUNT,
-	CSA_CENTER_FREQ1,
-	CSA_CENTER_FREQ2,
-	CSA_BANDWIDTH,
-	CSA_SEC_CHANNEL_OFFSET,
-	CSA_HT,
-	CSA_VHT,
-	CSA_HE,
-	CSA_BLOCK_TX,
-	CSA_FORCE,
-	__CSA_MAX
-};
-
-static const struct blobmsg_policy csa_policy[__CSA_MAX] = {
-	[CSA_FREQ] = { "freq", BLOBMSG_TYPE_INT32 },
-	[CSA_BCN_COUNT] = { "bcn_count", BLOBMSG_TYPE_INT32 },
-	[CSA_CENTER_FREQ1] = { "center_freq1", BLOBMSG_TYPE_INT32 },
-	[CSA_CENTER_FREQ2] = { "center_freq2", BLOBMSG_TYPE_INT32 },
-	[CSA_BANDWIDTH] = { "bandwidth", BLOBMSG_TYPE_INT32 },
-	[CSA_SEC_CHANNEL_OFFSET] = { "sec_channel_offset", BLOBMSG_TYPE_INT32 },
-	[CSA_HT] = { "ht", BLOBMSG_TYPE_BOOL },
-	[CSA_VHT] = { "vht", BLOBMSG_TYPE_BOOL },
-	[CSA_HE] = { "he", BLOBMSG_TYPE_BOOL },
-	[CSA_BLOCK_TX] = { "block_tx", BLOBMSG_TYPE_BOOL },
-	[CSA_FORCE] = { "force", BLOBMSG_TYPE_BOOL },
-};
-
 
 static void switch_chan_fallback_cb(void *eloop_data, void *user_ctx)
 {
@@ -910,112 +957,15 @@ static void switch_chan_fallback_cb(void *eloop_data, void *user_ctx)
 
 #ifdef NEED_AP_MLME
 static int
-hostapd_switch_chan(struct ubus_context *ctx, struct ubus_object *obj,
-		    struct ubus_request_data *req, const char *method,
-		    struct blob_attr *msg)
+hostapd_bss_switch_chan(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
 {
-	struct blob_attr *tb[__CSA_MAX];
 	struct hostapd_data *hapd = get_hapd_from_object(obj);
-	struct hostapd_config *iconf = hapd->iface->conf;
-	struct hostapd_freq_params *freq_params;
-	struct hostapd_hw_modes *mode = hapd->iface->current_mode;
-	struct csa_settings css = {
-		.freq_params = {
-			.ht_enabled = iconf->ieee80211n,
-			.vht_enabled = iconf->ieee80211ac,
-			.he_enabled = iconf->ieee80211ax,
-			.sec_channel_offset = iconf->secondary_channel,
-		}
-	};
-	u8 chwidth = hostapd_get_oper_chwidth(iconf);
-	u8 seg0 = 0, seg1 = 0;
-	int ret = UBUS_STATUS_OK;
-	int i;
 
-	blobmsg_parse(csa_policy, __CSA_MAX, tb, blob_data(msg), blob_len(msg));
-
-	if (!tb[CSA_FREQ])
-		return UBUS_STATUS_INVALID_ARGUMENT;
-
-	switch (iconf->vht_oper_chwidth) {
-	case CHANWIDTH_USE_HT:
-		if (iconf->secondary_channel)
-			css.freq_params.bandwidth = 40;
-		else
-			css.freq_params.bandwidth = 20;
-		break;
-	case CHANWIDTH_160MHZ:
-		css.freq_params.bandwidth = 160;
-		break;
-	default:
-		css.freq_params.bandwidth = 80;
-		break;
-	}
-
-	css.freq_params.freq = blobmsg_get_u32(tb[CSA_FREQ]);
-
-#define SET_CSA_SETTING(name, field, type) \
-	do { \
-		if (tb[name]) \
-			css.field = blobmsg_get_ ## type(tb[name]); \
-	} while(0)
-
-	SET_CSA_SETTING(CSA_BCN_COUNT, cs_count, u32);
-	SET_CSA_SETTING(CSA_CENTER_FREQ1, freq_params.center_freq1, u32);
-	SET_CSA_SETTING(CSA_CENTER_FREQ2, freq_params.center_freq2, u32);
-	SET_CSA_SETTING(CSA_BANDWIDTH, freq_params.bandwidth, u32);
-	SET_CSA_SETTING(CSA_SEC_CHANNEL_OFFSET, freq_params.sec_channel_offset, u32);
-	SET_CSA_SETTING(CSA_HT, freq_params.ht_enabled, bool);
-	SET_CSA_SETTING(CSA_VHT, freq_params.vht_enabled, bool);
-	SET_CSA_SETTING(CSA_HE, freq_params.he_enabled, bool);
-	SET_CSA_SETTING(CSA_BLOCK_TX, block_tx, bool);
-
-	css.freq_params.channel = hostapd_hw_get_channel(hapd, css.freq_params.freq);
-	if (!css.freq_params.channel)
-		return UBUS_STATUS_NOT_SUPPORTED;
-
-	switch (css.freq_params.bandwidth) {
-	case 160:
-		chwidth = CHANWIDTH_160MHZ;
-		break;
-	case 80:
-		chwidth = css.freq_params.center_freq2 ? CHANWIDTH_80P80MHZ : CHANWIDTH_80MHZ;
-		break;
-	default:
-		chwidth = CHANWIDTH_USE_HT;
-		break;
-	}
-
-	hostapd_set_freq_params(&css.freq_params, iconf->hw_mode,
-				css.freq_params.freq,
-				css.freq_params.channel, iconf->enable_edmg,
-				iconf->edmg_channel,
-				css.freq_params.ht_enabled,
-				css.freq_params.vht_enabled,
-				css.freq_params.he_enabled,
-				css.freq_params.sec_channel_offset,
-				chwidth, seg0, seg1,
-				iconf->vht_capab,
-				mode ? &mode->he_capab[IEEE80211_MODE_AP] :
-				NULL);
-
-	for (i = 0; i < hapd->iface->num_bss; i++) {
-		struct hostapd_data *bss = hapd->iface->bss[i];
-
-		if (hostapd_switch_channel(bss, &css) != 0)
-			ret = UBUS_STATUS_NOT_SUPPORTED;
-	}
-
-	if (!ret || !tb[CSA_FORCE] || !blobmsg_get_bool(tb[CSA_FORCE]))
-		return ret;
-
-	freq_params = malloc(sizeof(*freq_params));
-	memcpy(freq_params, &css.freq_params, sizeof(*freq_params));
-	eloop_register_timeout(0, 1, switch_chan_fallback_cb,
-			       hapd->iface, freq_params);
-
-	return 0;
-#undef SET_CSA_SETTING
+	if (hapd)
+		return hostapd_switch_chan(hapd, msg);
+	return UBUS_STATUS_INVALID_ARGUMENT;
 }
 #endif
 
@@ -1795,7 +1745,7 @@ static const struct ubus_method bss_methods[] = {
 	UBUS_METHOD_NOARG("update_beacon", hostapd_bss_update_beacon),
 	UBUS_METHOD_NOARG("get_features", hostapd_bss_get_features),
 #ifdef NEED_AP_MLME
-	UBUS_METHOD("switch_chan", hostapd_switch_chan, csa_policy),
+	UBUS_METHOD("switch_chan", hostapd_bss_switch_chan, csa_policy),
 #endif
 	UBUS_METHOD("set_vendor_elements", hostapd_vendor_elements, ve_policy),
 	UBUS_METHOD("notify_response", hostapd_notify_response, notify_policy),
