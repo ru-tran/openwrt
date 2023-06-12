@@ -77,6 +77,8 @@ static bool hostapd_ubus_init(void)
 
 	ctx->connection_lost = hostapd_ubus_connection_lost;
 	eloop_register_read_sock(ctx->sock.fd, ubus_receive, ctx, NULL);
+
+
 	return true;
 }
 
@@ -99,16 +101,114 @@ static void hostapd_ubus_ref_dec(void)
 	ctx = NULL;
 }
 
+static int
+hostapd_iface_get_state(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct hostapd_iface *iface = container_of(obj, struct hostapd_iface,
+			ubus.obj);
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_u32(&b, "state_num", iface->state);
+	blobmsg_add_string(&b, "state", hostapd_state_text(iface->state));
+	blobmsg_add_u32(&b, "freq", iface->freq);
+	if (iface->bss[0] && iface->bss[0]->conf->uci_device)
+		blobmsg_add_string(&b, "device", iface->bss[0]->conf->uci_device);
+	ubus_send_reply(ctx, req, b.head);
+
+	return 0;
+}
+static int
+hostapd_iface_get_bss(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct hostapd_iface *iface = container_of(obj, struct hostapd_iface,
+			ubus.obj);
+	struct hostapd_data *bss;
+	void *a,*h;
+	int i;
+	const char *state = hostapd_state_text(iface->state);
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_u32(&b, "state_num", iface->state);
+	blobmsg_add_string(&b, "state", state);
+	blobmsg_add_u32(&b, "freq", iface->freq);
+	if (iface->bss[0] && iface->bss[0]->conf->uci_device)
+		blobmsg_add_string(&b, "device", iface->bss[0]->conf->uci_device);
+	a = blobmsg_open_array(&b, "bss");
+	for (i=0; i<iface->num_bss; ++i) {
+		bss = iface->bss[i];
+		h = blobmsg_open_table(&b, NULL);
+		blobmsg_add_string(&b, "iface", bss->conf->iface);
+		blobmsg_add_string(&b, "state", state);
+		if (bss->conf->uci_device)
+			blobmsg_add_string(&b, "device", bss->conf->uci_device);
+		if (bss->ubus.obj.id)
+			blobmsg_add_string(&b, "uobject", bss->ubus.obj.name);
+		blobmsg_close_table(&b, h);
+	}
+	blobmsg_close_array(&b, a);
+	ubus_send_reply(ctx, req, b.head);
+
+	return 0;
+}
+static const struct ubus_method iface_methods[] = {
+	//UBUS_METHOD_NOARG("get_state", hostapd_iface_get_state),
+	//UBUS_METHOD_NOARG("get_bss", hostapd_iface_get_bss),
+
+	{ .name = "get_state", .handler = hostapd_iface_get_state },
+	{ .name = "get_bss", .handler = hostapd_iface_get_bss },
+
+};
+static struct ubus_object_type iface_object_type =
+	UBUS_OBJECT_TYPE("hostapd_iface", iface_methods);
+
 void hostapd_ubus_add_iface(struct hostapd_iface *iface)
 {
+
+	struct ubus_object *obj = &iface->ubus.obj;
+	char *name, *ifname = NULL;
+	int ret;
+
 	if (!hostapd_ubus_init())
 		return;
+
+	if (obj->id)
+		return;
+
+	if (iface->bss[0] && iface->bss[0]->conf->uci_device)
+		ifname = iface->bss[0]->conf->uci_device;
+	else
+		ifname = iface->phy;
+
+	if (asprintf(&name, "hostapd_iface.%s", ifname) < 0)
+		return;
+
+	obj->name = name;
+	obj->type = &iface_object_type;
+	obj->methods = iface_object_type.methods;
+	obj->n_methods = iface_object_type.n_methods;
+
+	ret = ubus_add_object(ctx, obj);
+
+	hostapd_ubus_ref_inc();
 }
 
 void hostapd_ubus_free_iface(struct hostapd_iface *iface)
 {
+	struct ubus_object *obj = &iface->ubus.obj;
+	char *name = (char *) obj->name;
 	if (!ctx)
 		return;
+	if (obj->id) {
+		ubus_remove_object(ctx, obj);
+		hostapd_ubus_ref_dec();
+	}
+
+	free(name);
+	obj->name = NULL;
 }
 
 static void hostapd_notify_ubus(struct ubus_object *obj, char *bssname, char *event)
@@ -427,7 +527,7 @@ hostapd_bss_get_status(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (hapd->conf->ssid.ssid_len < SSID_MAX_LEN)
 		ssid_len = hapd->conf->ssid.ssid_len;
-	
+
 	ieee80211_freq_to_channel_ext(hapd->iface->freq,
 				      hapd->iconf->secondary_channel,
 				      hostapd_get_oper_chwidth(hapd->iconf),
@@ -1762,6 +1862,7 @@ void hostapd_ubus_free_bss(struct hostapd_data *hapd)
 	}
 
 	free(name);
+	obj->name = NULL;
 }
 
 static void
@@ -1855,6 +1956,13 @@ ubus_event_cb(struct ubus_notify_request *req, int idx, int ret)
 	ureq->resp = ret;
 }
 
+static void blobmsg_add_hapd_id(struct blob_buf *buf, struct hostapd_data *hapd)
+{
+	if (hapd->conf->uci_device)
+		blobmsg_add_string(buf, "device", hapd->conf->uci_device);
+	blobmsg_add_macaddr(buf, "bssid", hapd->own_addr);
+	blobmsg_add_string(buf, "iface", hapd->conf->iface);
+}
 int hostapd_ubus_handle_event(struct hostapd_data *hapd, struct hostapd_ubus_request *req)
 {
 	struct ubus_banned_client *ban;
@@ -1959,6 +2067,8 @@ void hostapd_ubus_notify(struct hostapd_data *hapd, const char *type, const u8 *
 	blob_buf_init(&b, 0);
 	blobmsg_add_macaddr(&b, "address", addr);
 
+	blobmsg_add_hapd_id(&b, hapd);
+
 	ubus_notify(ctx, &hapd->ubus.obj, type, b.head, -1);
 }
 
@@ -1986,6 +2096,30 @@ void hostapd_ubus_notify_beacon_report(
 	blobmsg_add_u16(&b, "parent-tsf", rep->parent_tsf);
 
 	ubus_notify(ctx, &hapd->ubus.obj, "beacon-report", b.head, -1);
+}
+
+void hostapd_ubus_event_iface_state(struct hostapd_iface *iface, int s)
+{
+	struct hostapd_data *hapd = iface->bss[0];
+
+	if (!hostapd_ubus_init())
+		return;
+
+	hostapd_ubus_add_iface(iface);
+	if (iface->state == s) {
+		return;
+	}
+
+	blob_buf_init(&b, 0);
+	if (hapd && hapd->conf->uci_device)
+		blobmsg_add_string(&b, "device", hapd->conf->uci_device);
+	if (iface->ubus.obj.id)
+		blobmsg_add_string(&b, "uobject", iface->ubus.obj.name);
+	blobmsg_add_u32(&b, "oldstate_num", iface->state);
+	blobmsg_add_string(&b, "oldstate", hostapd_state_text(iface->state));
+	blobmsg_add_u32(&b, "state_num", s);
+	blobmsg_add_string(&b, "state", hostapd_state_text(s));
+	ubus_send_event(ctx, "hostapd.iface_state", b.head);
 }
 
 void hostapd_ubus_notify_radar_detected(struct hostapd_iface *iface, int frequency,
@@ -2045,7 +2179,7 @@ void hostapd_ubus_notify_bss_transition_response(
 	blobmsg_add_u8(&b, "bss-termination-delay", bss_termination_delay);
 	if (target_bssid)
 		blobmsg_add_macaddr(&b, "target-bssid", target_bssid);
-	
+
 	hostapd_ubus_notify_bss_transition_add_candidate_list(candidate_list, candidate_list_len);
 
 	ubus_notify(ctx, &hapd->ubus.obj, "bss-transition-response", b.head, -1);

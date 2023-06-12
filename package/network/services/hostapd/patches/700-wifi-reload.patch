@@ -9,7 +9,7 @@
  	} else if (os_strcmp(buf, "skip_inactivity_poll") == 0) {
  		bss->skip_inactivity_poll = atoi(pos);
  	} else if (os_strcmp(buf, "country_code") == 0) {
-@@ -3158,6 +3160,8 @@ static int hostapd_config_fill(struct ho
+@@ -3164,6 +3166,8 @@ static int hostapd_config_fill(struct ho
  		}
  	} else if (os_strcmp(buf, "acs_exclude_dfs") == 0) {
  		conf->acs_exclude_dfs = atoi(pos);
@@ -28,7 +28,7 @@
  	os_free(conf->ca_cert);
  	os_free(conf->server_cert);
  	os_free(conf->server_cert2);
-@@ -988,6 +989,7 @@ void hostapd_config_free(struct hostapd_
+@@ -989,6 +990,7 @@ void hostapd_config_free(struct hostapd_
  
  	for (i = 0; i < conf->num_bss; i++)
  		hostapd_config_free_bss(conf->bss[i]);
@@ -47,7 +47,7 @@
  	enum hostapd_logger_level logger_syslog_level, logger_stdout_level;
  
  	unsigned int logger_syslog; /* module bitfield */
-@@ -942,6 +944,7 @@ struct spatial_reuse {
+@@ -943,6 +945,7 @@ struct spatial_reuse {
  struct hostapd_config {
  	struct hostapd_bss_config **bss, *last_bss;
  	size_t num_bss;
@@ -68,16 +68,17 @@
  	if (newconf->num_bss != oldconf->num_bss)
  		return 1;
  
-@@ -232,7 +236,7 @@ static int hostapd_iface_conf_changed(st
+@@ -231,8 +235,7 @@ static int hostapd_iface_conf_changed(st
+ 	return 0;
  }
  
- 
+-
 -int hostapd_reload_config(struct hostapd_iface *iface)
 +int hostapd_reload_config(struct hostapd_iface *iface, int reconf)
  {
  	struct hapd_interfaces *interfaces = iface->interfaces;
  	struct hostapd_data *hapd = iface->bss[0];
-@@ -255,13 +259,16 @@ int hostapd_reload_config(struct hostapd
+@@ -255,13 +258,16 @@ int hostapd_reload_config(struct hostapd
  	if (newconf == NULL)
  		return -1;
  
@@ -96,7 +97,7 @@
  		wpa_printf(MSG_DEBUG,
  			   "Configuration changes include interface/BSS modification - force full disable+enable sequence");
  		fname = os_strdup(iface->config_fname);
-@@ -286,6 +293,24 @@ int hostapd_reload_config(struct hostapd
+@@ -286,6 +292,24 @@ int hostapd_reload_config(struct hostapd
  			wpa_printf(MSG_ERROR,
  				   "Failed to enable interface on config reload");
  		return res;
@@ -121,7 +122,7 @@
  	}
  	iface->conf = newconf;
  
-@@ -302,6 +327,12 @@ int hostapd_reload_config(struct hostapd
+@@ -302,6 +326,12 @@ int hostapd_reload_config(struct hostapd
  
  	for (j = 0; j < iface->num_bss; j++) {
  		hapd = iface->bss[j];
@@ -134,7 +135,7 @@
  		hapd->iconf = newconf;
  		hapd->conf = newconf->bss[j];
  		hostapd_reload_bss(hapd);
-@@ -2397,6 +2428,10 @@ hostapd_alloc_bss_data(struct hostapd_if
+@@ -2398,6 +2428,10 @@ hostapd_alloc_bss_data(struct hostapd_if
  	hapd->iconf = conf;
  	hapd->conf = bss;
  	hapd->iface = hapd_iface;
@@ -164,7 +165,7 @@
  	int interface_added; /* virtual interface added for this BSS */
  	unsigned int started:1;
  	unsigned int disabled:1;
-@@ -624,7 +625,7 @@ struct hostapd_iface {
+@@ -625,7 +626,7 @@ struct hostapd_iface {
  int hostapd_for_each_interface(struct hapd_interfaces *interfaces,
  			       int (*cb)(struct hostapd_iface *iface,
  					 void *ctx), void *ctx);

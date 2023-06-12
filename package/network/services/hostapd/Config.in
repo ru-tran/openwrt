@@ -39,7 +39,7 @@ config WPA_MSG_MIN_PRIORITY
 		   PACKAGE_wpad-mini || \
 		   PACKAGE_wpad-mesh-openssl || \
 		   PACKAGE_wpad-mesh-wolfssl
-	default 3
+	default 0
 	help
 	  Useful values are:
 	    0 = all messages

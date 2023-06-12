@@ -250,6 +250,8 @@ hostapd_common_add_bss_config() {
 	config_add_string 'bssid:macaddr' 'ssid:string'
 	config_add_boolean wds wmm uapsd hidden utf8_ssid
 
+	config_add_string device
+
 	config_add_int maxassoc max_inactivity
 	config_add_boolean disassoc_low_ack isolate short_preamble skip_inactivity_poll
 
@@ -601,6 +603,7 @@ hostapd_set_bss_options() {
 	if [ "$max_inactivity" -gt 0 ]; then
 		append bss_conf "ap_max_inactivity=$max_inactivity" "$N"
 	fi
+	[ -n "$device" ] && append bss_conf "uci_device=$device" "$N"
 
 	[ "$airtime_bss_weight" -gt 0 ] && append bss_conf "airtime_bss_weight=$airtime_bss_weight" "$N"
 	[ "$airtime_bss_limit" -gt 0 ] && append bss_conf "airtime_bss_limit=$airtime_bss_limit" "$N"

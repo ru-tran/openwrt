@@ -5,6 +5,6 @@
 			"methods": [ "event" ]
 		}
 	},
-	"publish": [ "hostapd", "hostapd.*", "wpa_supplicant", "wpa_supplicant.*" ],
+	"publish": [ "hostapd", "hostapd.*", "wpa_supplicant", "wpa_supplicant.*", "hostapd_iface.*" ],
 	"send": [ "bss.*", "wps_credentials" ]
 }
