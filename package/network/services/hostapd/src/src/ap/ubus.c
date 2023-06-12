@@ -2132,7 +2132,10 @@ void hostapd_ubus_event_iface_state(struct hostapd_iface *iface, int s)
 	if (!hostapd_ubus_init())
 		return;
 
-	hostapd_ubus_add_iface(iface);
+	// after 21.02 we don't need to recreate ubus obj for iface
+	// because hostapd running as daemon and it will be memory corruption
+	// hostapd_ubus_add_iface(iface);
+
 	if (iface->state == s) {
 		return;
 	}
