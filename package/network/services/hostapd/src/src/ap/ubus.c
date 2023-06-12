@@ -676,6 +676,60 @@ hostapd_iface_switch_chan_list(struct ubus_context *ctx, struct ubus_object *obj
 }
 #endif
 
+enum {
+	STA_ACCOUNT_ADDR,
+	__STA_ACCOUNT_MAX,
+};
+
+static const struct blobmsg_policy sta_account_policy[__STA_ACCOUNT_MAX] = {
+	[STA_ACCOUNT_ADDR] = { "addr", BLOBMSG_TYPE_STRING },
+};
+static void
+blobmsg_add_station_accounting(struct blob_buf *buf,
+		const char *name,
+		struct sta_info *sta,
+		const struct hostap_sta_driver_data *data,
+		const struct os_reltime *session_time,
+		int cause);
+static void blobmsg_add_hapd_id(struct blob_buf *buf, struct hostapd_data *hapd);
+static int
+hostapd_iface_get_station_account(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct hostapd_iface *iface = container_of(obj, struct hostapd_iface,
+			ubus.obj);
+	struct hostapd_data *bss = NULL;
+	size_t i;
+	struct sta_info *sta = NULL;
+	u8 addr[ETH_ALEN];
+	struct blob_attr *tb[__STA_ACCOUNT_MAX];
+
+	blobmsg_parse(sta_account_policy, __STA_ACCOUNT_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[STA_ACCOUNT_ADDR])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (hwaddr_aton(blobmsg_data(tb[STA_ACCOUNT_ADDR]), addr))
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	for (i=0; i<iface->num_bss; ++i) {
+		bss = iface->bss[i];
+		sta = ap_get_sta(bss, addr);
+		if (sta != NULL) {
+			break;
+		}
+	}
+	if (sta == NULL) {
+		return UBUS_STATUS_NOT_FOUND;
+	}
+	blob_buf_init(&b, 0);
+	blobmsg_add_station_accounting(&b, "station", sta, NULL,  NULL, 0);
+	blobmsg_add_hapd_id(&b, bss);
+	ubus_send_reply(ctx, req, b.head);
+
+	return 0;
+}
+
 static const struct ubus_method iface_methods[] = {
 	UBUS_METHOD_NOARG("get_state", hostapd_iface_get_state),
 	UBUS_METHOD_NOARG("get_bss", hostapd_iface_get_bss),
@@ -684,6 +738,7 @@ static const struct ubus_method iface_methods[] = {
 		UBUS_METHOD("switch_chan_list", hostapd_iface_switch_chan_list,
 			csa_list_policy),
 	#endif
+	UBUS_METHOD("get_client_account", hostapd_iface_get_station_account, sta_account_policy),
 };
 static struct ubus_object_type iface_object_type =
 	UBUS_OBJECT_TYPE("hostapd_iface", iface_methods);
@@ -2180,6 +2235,34 @@ hostapd_bss_update_airtime(struct ubus_context *ctx, struct ubus_object *obj,
 }
 #endif
 
+static int
+hostapd_bss_get_client_account(struct ubus_context *ctx, struct ubus_object *obj,
+			      struct ubus_request_data *req, const char *method,
+			      struct blob_attr *msg)
+{
+	struct hostapd_data *hapd = container_of(obj, struct hostapd_data, ubus.obj);
+	struct sta_info *sta = NULL;
+	u8 addr[ETH_ALEN];
+	struct blob_attr *tb[__STA_ACCOUNT_MAX];
+
+	blobmsg_parse(sta_account_policy, __STA_ACCOUNT_MAX, tb, blob_data(msg), blob_len(msg));
+	if (!tb[STA_ACCOUNT_ADDR])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (hwaddr_aton(blobmsg_data(tb[STA_ACCOUNT_ADDR]), addr))
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	sta = ap_get_sta(hapd, addr);
+	if (sta == NULL) {
+		return UBUS_STATUS_NOT_FOUND;
+	}
+	blob_buf_init(&b, 0);
+	blobmsg_add_station_accounting(&b, "station", sta, NULL,  NULL, 0);
+	blobmsg_add_hapd_id(&b, hapd);
+	ubus_send_reply(ctx, req, b.head);
+
+	return 0;
+}
+
 
 static const struct ubus_method bss_methods[] = {
 	UBUS_METHOD_NOARG("reload", hostapd_bss_reload),
@@ -2213,6 +2296,7 @@ static const struct ubus_method bss_methods[] = {
 	UBUS_METHOD("wnm_disassoc_imminent", hostapd_wnm_disassoc_imminent, wnm_disassoc_policy),
 	UBUS_METHOD("bss_transition_request", hostapd_bss_transition_request, bss_tr_policy),
 #endif
+	UBUS_METHOD("get_client_account", hostapd_bss_get_client_account, sta_account_policy),
 };
 
 static struct ubus_object_type bss_object_type =
