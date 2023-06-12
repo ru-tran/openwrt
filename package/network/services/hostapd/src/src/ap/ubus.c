@@ -217,6 +217,7 @@ void hostapd_ubus_free_iface(struct hostapd_iface *iface)
 
 static void hostapd_notify_ubus(struct ubus_object *obj, char *bssname, char *event)
 {
+	int ret = 0;
 	char *event_type;
 
 	if (!ctx || !obj)
@@ -1307,6 +1308,7 @@ hostapd_rrm_nr_set(struct ubus_context *ctx, struct ubus_object *obj,
 	struct blob_attr *tb_l[__NR_SET_LIST_MAX];
 	struct blob_attr *tb[ARRAY_SIZE(nr_e_policy)];
 	struct blob_attr *cur;
+	int ret = 0;
 	int rem;
 
 	hostapd_rrm_nr_enable(hapd);
@@ -2099,6 +2101,53 @@ void hostapd_ubus_notify(struct hostapd_data *hapd, const char *type, const u8 *
 	ubus_notify(ctx, &hapd->ubus.obj, type, b.head, -1);
 }
 
+static void blobmsg_add_iface_state(struct blob_buf *buff,
+		struct hostapd_iface *iface, int cur, int old)
+{
+	blobmsg_add_u32(buff, "oldstate_num", old);
+	blobmsg_add_string(buff, "oldstate", hostapd_state_text(old));
+	blobmsg_add_u32(buff, "state_num", cur);
+	blobmsg_add_string(buff, "state", hostapd_state_text(cur));
+}
+static void blobmsg_add_iface_channel(struct blob_buf *buff,
+		struct hostapd_iface *iface)
+{
+	struct hostapd_config *conf = iface->conf;
+	int width = 20;
+	void *chan;
+
+	if (!iface->freq) {
+		return;
+	}
+
+	chan = blobmsg_open_table(buff, "channel");
+
+	blobmsg_add_u32(buff, "freq", iface->freq);
+	blobmsg_add_u32(buff, "channel", conf->channel);
+	blobmsg_add_u8(buff, "ht", conf->ieee80211n);
+	blobmsg_add_u8(buff, "vht", conf->ieee80211ac);
+	blobmsg_add_u32(buff, "secondary_channel", conf->secondary_channel);
+	switch (conf->vht_oper_chwidth) {
+		case CHANWIDTH_USE_HT:
+			width = conf->secondary_channel ? 40 : 20;
+			break;
+		case CHANWIDTH_80MHZ:
+			width = 80;
+			break;
+		case CHANWIDTH_160MHZ:
+			width = 160;
+			break;
+		case CHANWIDTH_80P80MHZ:
+			width = 8080;
+			break;
+	}
+	blobmsg_add_u32(buff, "width", width);
+	blobmsg_add_u32(buff, "center_idx0", conf->vht_oper_centr_freq_seg0_idx);
+	blobmsg_add_u32(buff, "center_idx1", conf->vht_oper_centr_freq_seg1_idx);
+	blobmsg_add_u8(buff, "is_dfs", ieee80211_is_dfs(iface->freq, iface->hw_features, iface->num_hw_features));
+	blobmsg_close_table(buff, chan);
+}
+
 void hostapd_ubus_notify_beacon_report(
 	struct hostapd_data *hapd, const u8 *addr, u8 token, u8 rep_mode,
 	struct rrm_measurement_beacon_report *rep, size_t len)
@@ -2145,10 +2194,25 @@ void hostapd_ubus_event_iface_state(struct hostapd_iface *iface, int s)
 		blobmsg_add_string(&b, "device", hapd->conf->uci_device);
 	if (iface->ubus.obj.id)
 		blobmsg_add_string(&b, "uobject", iface->ubus.obj.name);
-	blobmsg_add_u32(&b, "oldstate_num", iface->state);
-	blobmsg_add_string(&b, "oldstate", hostapd_state_text(iface->state));
-	blobmsg_add_u32(&b, "state_num", s);
-	blobmsg_add_string(&b, "state", hostapd_state_text(s));
+	blobmsg_add_iface_state(&b, iface, s, iface->state);
+	blobmsg_add_iface_channel(&b, iface);
+	ubus_send_event(ctx, "hostapd.iface_state", b.head);
+}
+
+void hostapd_ubus_event_ch_switch(struct hostapd_iface *iface)
+{
+	struct hostapd_data *hapd = iface->bss[0];
+
+	if (!hostapd_ubus_init())
+		return;
+	hostapd_ubus_add_iface(iface);
+	blob_buf_init(&b, 0);
+	if (hapd && hapd->conf->uci_device)
+		blobmsg_add_string(&b, "device", hapd->conf->uci_device);
+	if (iface->ubus.obj.id)
+		blobmsg_add_string(&b, "uobject", iface->ubus.obj.name);
+	blobmsg_add_iface_state(&b, iface, iface->state, iface->state);
+	blobmsg_add_iface_channel(&b, iface);
 	ubus_send_event(ctx, "hostapd.iface_state", b.head);
 }
 
