@@ -6,5 +6,5 @@
 		}
 	},
 	"publish": [ "hostapd", "hostapd.*", "wpa_supplicant", "wpa_supplicant.*", "hostapd_iface.*" ],
-	"send": [ "bss.*", "wps_credentials" ]
+	"send": [ "bss.*", "wps_credentials", "hostapd.iface_state" ]
 }
