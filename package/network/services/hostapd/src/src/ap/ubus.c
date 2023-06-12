@@ -24,6 +24,8 @@
 #include "rrm.h"
 #include "wnm_ap.h"
 #include "taxonomy.h"
+#include "hw_features.h"
+#include "common/hw_features_common.h"
 #include "airtime_policy.h"
 #include "hw_features.h"
 
@@ -163,6 +165,9 @@ hostapd_iface_get_bss(struct ubus_context *ctx, struct ubus_object *obj,
 #ifdef NEED_AP_MLME
 enum {
 	CSA_FREQ,
+	CSA_CHANNEL,
+	CSA_FREQS,
+	CSA_CHANNELS,
 	CSA_BCN_COUNT,
 	CSA_CENTER_FREQ1,
 	CSA_CENTER_FREQ2,
@@ -170,12 +175,19 @@ enum {
 	CSA_SEC_CHANNEL_OFFSET,
 	CSA_HT,
 	CSA_VHT,
+	CSA_SECONDARY_CHANNEL,
+	CSA_VHT_OPER_CWIDTH,
 	CSA_BLOCK_TX,
+	CSA_FAST,
+	CSA_ALLOW_ACS,
 	__CSA_MAX
 };
 
 static const struct blobmsg_policy csa_policy[__CSA_MAX] = {
 	[CSA_FREQ] = { "freq", BLOBMSG_TYPE_INT32 },
+	[CSA_CHANNEL] = { "channel", BLOBMSG_TYPE_INT32 },
+	[CSA_FREQS] = { "freqs", BLOBMSG_TYPE_ARRAY },
+	[CSA_CHANNELS] = { "channels", BLOBMSG_TYPE_ARRAY },
 	[CSA_BCN_COUNT] = { "bcn_count", BLOBMSG_TYPE_INT32 },
 	[CSA_CENTER_FREQ1] = { "center_freq1", BLOBMSG_TYPE_INT32 },
 	[CSA_CENTER_FREQ2] = { "center_freq2", BLOBMSG_TYPE_INT32 },
@@ -183,8 +195,359 @@ static const struct blobmsg_policy csa_policy[__CSA_MAX] = {
 	[CSA_SEC_CHANNEL_OFFSET] = { "sec_channel_offset", BLOBMSG_TYPE_INT32 },
 	[CSA_HT] = { "ht", BLOBMSG_TYPE_BOOL },
 	[CSA_VHT] = { "vht", BLOBMSG_TYPE_BOOL },
+	[CSA_SECONDARY_CHANNEL] = { "secondary_channel", BLOBMSG_TYPE_INT32 },
+	[CSA_VHT_OPER_CWIDTH] = { "vht_oper_chwidth", BLOBMSG_TYPE_INT32 },
+	[CSA_BCN_COUNT] = { "bcn_count", BLOBMSG_TYPE_INT32 },
 	[CSA_BLOCK_TX] = { "block_tx", BLOBMSG_TYPE_BOOL },
+	[CSA_FAST] = { "fast", BLOBMSG_TYPE_BOOL },
+	[CSA_ALLOW_ACS] = { "allow_acs", BLOBMSG_TYPE_BOOL },
 };
+
+static void ubus_adjust_vht_center_freq(struct hostapd_iface *iface,
+				       int chan, int secondary_channel, int *vht_oper_chwidth,
+					   int ht, int vht,
+				       u8 *vht_oper_centr_freq_seg0_idx,
+				       u8 *vht_oper_centr_freq_seg1_idx)
+{
+	*vht_oper_centr_freq_seg1_idx = 0;
+	if (!chan)
+		return;
+	if (!ht && !vht) {
+		*vht_oper_chwidth = CHANWIDTH_USE_HT;
+		*vht_oper_centr_freq_seg0_idx = chan;
+		return;
+	}
+
+	switch (*vht_oper_chwidth) {
+	case CHANWIDTH_USE_HT:
+	case 40:
+		*vht_oper_chwidth = CHANWIDTH_USE_HT;
+		if (secondary_channel == 1)
+			*vht_oper_centr_freq_seg0_idx = chan + 2;
+		else if (secondary_channel == -1)
+			*vht_oper_centr_freq_seg0_idx = chan - 2;
+		else
+			*vht_oper_centr_freq_seg0_idx = chan;
+		break;
+	case CHANWIDTH_80MHZ:
+	case 80:
+		*vht_oper_chwidth = CHANWIDTH_80MHZ;
+		*vht_oper_centr_freq_seg0_idx = chan + 6;
+		break;
+	case CHANWIDTH_160MHZ:
+	case 160:
+		*vht_oper_chwidth = CHANWIDTH_160MHZ;
+		*vht_oper_centr_freq_seg0_idx = chan + 14;
+		break;
+	case 20:
+	default:
+		*vht_oper_chwidth = CHANWIDTH_USE_HT;
+		*vht_oper_centr_freq_seg0_idx = chan;
+		break;
+	}
+}
+static int ubus_bandwidth_to_vht_oper_chwidth(int bandwidth, int center_freq1,
+			int center_freq2)
+{
+	if (bandwidth < 80) {
+		return CHANWIDTH_USE_HT;
+	} else if (bandwidth < 160) {
+		return center_freq2 ? CHANWIDTH_80P80MHZ : CHANWIDTH_80MHZ;
+	} else {
+		return CHANWIDTH_160MHZ;
+	}
+}
+
+static int
+hostapd_iface_try_channel_fallback_helper(struct hostapd_iface *iface,
+		struct wpa_freq_range_list *ch_list, int ht, int vht, int sec_channel,
+		int vht_oper_chwidth, int center_idx0, int center_idx1, int acs,
+		int *disabled, int do_switch)
+{
+	iface->conf->ieee80211n = ht;
+	iface->conf->ieee80211ac = vht;
+    iface->conf->secondary_channel = sec_channel;
+	//iface->freq = ch_list->range->min;
+	iface->conf->channel = ch_list->range->min;
+	iface->conf->vht_oper_centr_freq_seg0_idx = center_idx0;
+	iface->conf->vht_oper_centr_freq_seg1_idx = center_idx1;
+	iface->conf->vht_oper_chwidth = vht_oper_chwidth;
+	iface->conf->acs = acs;
+	if (acs)
+		iface->conf->channel = 0;
+	wpa_printf(MSG_DEBUG, "ubus: Fallback channel switch selected %d - %s, "
+			"list: %s, ht - %d, vht - %d sec_channel - %d, seg0_idx - %d, "
+			"seg1_idx - %d, chwidth - %d", iface->conf->channel,
+			acs ? "with acs" : "without acs", freq_range_list_str(ch_list), ht,
+			vht, sec_channel, center_idx0, center_idx1, vht_oper_chwidth);
+	iface->conf->acs_ch_list.range =
+		os_realloc_array(iface->conf->acs_ch_list.range, ch_list->num,
+			sizeof(struct wpa_freq_range));
+	os_memcpy (iface->conf->acs_ch_list.range, ch_list->range,
+			ch_list->num * 	sizeof(struct wpa_freq_range));
+	iface->conf->acs_ch_list.num = ch_list->num;
+
+	if (!*disabled) {
+		if (!do_switch) {
+			return 0;
+		}
+		hostapd_disable_iface(iface);
+		*disabled = 1;
+	}
+	if (!hostapd_enable_iface(iface)) {
+		*disabled = 0;
+		return 0;
+	}
+	return -1;
+}
+static int
+hostapd_iface_try_channel_fallback(struct hostapd_iface *iface,
+		struct wpa_freq_range_list *ch_list, int ht, int vht, int sec_channel,
+		int vht_oper_chwidth, int acs, int *disabled, int do_switch)
+{
+	u8 center_idx0, center_idx1;
+	ubus_adjust_vht_center_freq(iface, ch_list->range->min, sec_channel,
+			&vht_oper_chwidth, ht, vht, &center_idx0,  &center_idx1);
+
+	return hostapd_iface_try_channel_fallback_helper(iface, ch_list, ht, vht,
+			sec_channel, vht_oper_chwidth, center_idx0, center_idx1, acs,
+			disabled, do_switch);
+}
+static int
+hostapd_iface_try_channel_fallback_fp(struct hostapd_iface *iface,
+		struct hostapd_freq_params *data, int acs,
+		struct wpa_freq_range_list *ch_list, int *disabled, int do_switch)
+{
+	int center_idx0 = hostapd_hw_get_channel(iface->bss[0], data->center_freq1);
+	int center_idx1 = hostapd_hw_get_channel(iface->bss[0], data->center_freq2);
+
+	return hostapd_iface_try_channel_fallback_helper(iface, ch_list,
+			data->ht_enabled, data->vht_enabled,
+			data->sec_channel_offset,
+			ubus_bandwidth_to_vht_oper_chwidth(data->bandwidth,
+				center_idx0, center_idx1), center_idx0, center_idx1,
+			acs, disabled, do_switch);
+}
+static int hostapd_set_curr_freq_params(struct hostapd_iface *iface,
+		struct hostapd_freq_params *params, int *acs,
+		struct wpa_freq_range_list *ch_list)
+{
+	struct hostapd_config *conf = iface->conf;
+	struct he_capabilities *he_cap = NULL;
+	memset(params, 0, sizeof(*params));
+	memset(ch_list, 0, sizeof(*ch_list));
+
+	if (hostapd_set_freq_params(params,
+				conf->hw_mode,
+				hostapd_hw_get_freq(*iface->bss, conf->channel),
+				conf->channel,
+				0,0, 
+				conf->ieee80211n,
+				conf->ieee80211ac,
+				0,
+				conf->secondary_channel,
+				conf->vht_oper_chwidth,
+				conf->vht_oper_centr_freq_seg0_idx,
+				conf->vht_oper_centr_freq_seg1_idx,
+				conf->vht_capab,
+				he_cap 
+			))
+    {
+            params->channel = 0;
+			return -1;
+    }
+	*acs = conf->acs;
+	if (!*acs)
+		return 0;
+	ch_list->range = os_calloc(conf->acs_ch_list.num, sizeof(*ch_list->range));
+	ch_list->num = conf->acs_ch_list.num;
+	os_memcpy(ch_list->range, conf->acs_ch_list.range,
+			conf->acs_ch_list.num * sizeof(*ch_list->range));
+    return 0;
+}
+static int
+hostapd_freq_params_compare(struct hostapd_freq_params *a,
+		struct hostapd_freq_params *b)
+{
+	/* Compiler could choose different size of enum than int. Other values are
+	 * the same size, so there should not be any padding */
+	return a->mode == b->mode &&
+		os_memcmp(&a->freq, &b->freq, sizeof(*a) - ((void *)&a->freq - (void *)a)) == 0;
+}
+
+static int
+hostapd_iface_try_channel(struct hostapd_iface *iface, struct hostapd_freq_params *old,
+		struct wpa_freq_range_list *ch_list, int ht, int vht, int sec_channel,
+		int vht_oper_chwidth, int cs_count, int block_tx, int fast,
+		int acs, int *disabled)
+{
+	struct csa_settings css;
+	struct hostapd_freq_params *freq_params = &css.freq_params;
+	struct he_capabilities *he_cap = NULL;
+	unsigned int i, k;
+	int err = 1;
+	int chan, freq;
+	u8 center_idx0, center_idx1;
+
+	memset(&css, 0, sizeof (css));
+	css.cs_count = cs_count;
+	css.block_tx = block_tx;
+
+	if (*disabled) {
+		return hostapd_iface_try_channel_fallback(iface, ch_list, ht, vht,
+				sec_channel, vht_oper_chwidth, acs, disabled, 1);
+	}
+	if (hostapd_csa_in_progress(iface) || iface->cac_started)
+		return -1;
+	if (iface->state != HAPD_IFACE_ENABLED) {
+		return hostapd_iface_try_channel_fallback(iface, ch_list, ht, vht,
+				sec_channel, vht_oper_chwidth, acs, disabled, 1);
+	}
+
+	for (i=0; i < ch_list->num; ++i) {
+		/*
+		 * Allow selection of DFS channel in ETSI to comply with
+		 * uniform spreading.
+		 */
+		chan = ch_list->range[i].min;
+		freq = hostapd_hw_get_freq(iface->bss[0], chan);
+		ubus_adjust_vht_center_freq(iface, chan, sec_channel, &vht_oper_chwidth,
+				ht, vht, &center_idx0, &center_idx1);
+
+		if (hostapd_set_freq_params(freq_params, iface->conf->hw_mode,
+					freq, chan,	0,0, ht, vht, 0, sec_channel, vht_oper_chwidth,
+					center_idx0, center_idx1,
+					iface->current_mode->vht_capab,
+					he_cap))
+		{
+			wpa_printf(MSG_WARNING, "Can not build channel freq=%d, chan=%d, "
+					"ht=%d, vht=%d, sec_channel=%d, vht_cwidth=%d, center0=%d, "
+					"center1=%d", freq, chan,
+					ht, vht, sec_channel, vht_oper_chwidth,
+					center_idx0, center_idx1);
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		}
+		if (hostapd_freq_params_compare(old, freq_params)) {
+			return 0;
+		}
+
+		/* Perform channel switch/CSA */
+		for (k = 0; k < iface->num_bss; k++) {
+			err = hostapd_switch_channel(iface->bss[k], &css);
+			if (err)
+				break;
+		}
+		if (!err) {
+			/* Set configuration to selected channel */
+			ch_list->range[i].min = ch_list->range[i].max = ch_list->range->min;
+			ch_list->range->min = ch_list->range->max = chan;
+			return hostapd_iface_try_channel_fallback(iface, ch_list, ht, vht,
+				sec_channel, vht_oper_chwidth, acs, disabled, 0);
+		} else if (!fast) {
+			/* In slow mode try only first channel for switch. Others - for
+			 * ACS and DFS procedures */
+			break;
+		}
+	}
+	if (fast)
+		return -1;
+	wpa_printf(MSG_DEBUG, "Can not perform fast switch. Use fallback method");
+	return hostapd_iface_try_channel_fallback(iface, ch_list, ht, vht,
+			sec_channel, vht_oper_chwidth, acs, disabled, 1);
+}
+static int ubus_check_channel(struct hostapd_iface *iface, int n)
+{
+	struct hostapd_channel_data *chan =
+		hw_get_channel_chan(iface->current_mode, n, NULL);
+
+	if (!chan) {
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+	if (chan->flag & HOSTAPD_CHAN_DISABLED) {
+		return UBUS_STATUS_NOT_SUPPORTED;
+	}
+	return 0;
+}
+static int blobmsg_get_ch_list(struct blob_attr *attr, struct hostapd_iface *iface,
+		struct wpa_freq_range_list *ch_list, int is_array, int is_channel)
+{
+	int val;
+	struct blob_attr *cur;
+	int rem;
+	int res = 0;
+
+	memset(ch_list, 0, sizeof(*ch_list));
+	if (!is_array) {
+		ch_list->range = os_calloc(1, sizeof(ch_list->range[0]));
+		val = blobmsg_get_u32(attr);
+		if (!is_channel)
+			val = hostapd_hw_get_channel(iface->bss[0], val);
+		ch_list->range->min = ch_list->range->max = val;
+		ch_list->num=1;
+		res = ubus_check_channel(iface, val);
+	} else blobmsg_for_each_attr(cur, attr, rem) {
+		ch_list->range = os_realloc_array(ch_list->range, ch_list->num + 1,
+				sizeof(ch_list->range[0]));
+		val = blobmsg_get_u32(cur);
+		ch_list->range[ch_list->num].min = ch_list->range[ch_list->num].max =
+			is_channel ? val : hostapd_hw_get_channel(iface->bss[0], val);
+		++ch_list->num;
+		res = ubus_check_channel(iface, val);
+		if (res)
+			break;
+	}
+	if (!res)
+		return 0;
+
+	os_free(ch_list->range);
+	ch_list->range = NULL;
+	ch_list->num=0;
+	return res;
+}
+static int
+hostapd_do_switch_chan(struct hostapd_iface *iface, struct blob_attr *tb[],
+		struct hostapd_freq_params *old, int cs_count, int block_tx, int fast,
+		int acs, int *disabled)
+{
+	struct wpa_freq_range_list ch_list;
+	int ht = old->ht_enabled;
+	int vht = old->vht_enabled;
+	int sec_channel = old->sec_channel_offset;
+	int vht_oper_chwidth = ubus_bandwidth_to_vht_oper_chwidth(old->bandwidth,
+			old->center_freq1, old->center_freq2);
+	int res = 1;
+
+	if (tb[CSA_FREQ]) {
+		res = blobmsg_get_ch_list(tb[CSA_FREQ], iface, &ch_list, 0, 0);
+	} else if (tb[CSA_CHANNEL]) {
+		res = blobmsg_get_ch_list(tb[CSA_CHANNEL], iface, &ch_list, 0, 1);
+	} else if (tb[CSA_FREQS]) {
+		res = blobmsg_get_ch_list(tb[CSA_FREQS], iface, &ch_list, 1, 0);
+	} else if (tb[CSA_CHANNELS]) {
+		res = blobmsg_get_ch_list(tb[CSA_CHANNELS], iface, &ch_list, 1, 1);
+	}
+	if (res)
+		return res;
+
+	if (tb[CSA_HT])
+		ht = blobmsg_get_bool(tb[CSA_HT]);
+	if (tb[CSA_VHT])
+		vht = blobmsg_get_bool(tb[CSA_VHT]);
+	if (tb[CSA_SECONDARY_CHANNEL])
+		sec_channel = blobmsg_get_u32(tb[CSA_SECONDARY_CHANNEL]);
+	if (tb[CSA_VHT_OPER_CWIDTH])
+		vht_oper_chwidth = blobmsg_get_u32(tb[CSA_VHT_OPER_CWIDTH]);
+	if (tb[CSA_BCN_COUNT])
+		cs_count = blobmsg_get_u32(tb[CSA_BCN_COUNT]);
+	if (tb[CSA_BLOCK_TX])
+		block_tx = blobmsg_get_bool(tb[CSA_BCN_COUNT]);
+	if (tb[CSA_FAST])
+		fast = blobmsg_get_bool(tb[CSA_FAST]);
+	if (tb[CSA_ALLOW_ACS])
+		acs = blobmsg_get_bool(tb[CSA_ALLOW_ACS]);
+	return hostapd_iface_try_channel(iface, old, &ch_list, ht, vht, sec_channel,
+			vht_oper_chwidth, cs_count, block_tx, fast, acs, disabled);
+}
 
 static int
 hostapd_switch_chan(struct hostapd_data *hapd, struct blob_attr *msg)
@@ -230,7 +593,85 @@ hostapd_iface_switch_chan(struct ubus_context *ctx, struct ubus_object *obj,
 	struct hostapd_iface *iface = container_of(obj, struct hostapd_iface,
 			ubus.obj);
 	if (iface && iface->bss[0])
-		return hostapd_switch_chan(iface->bss[0], msg);
+		return hostapd_switch_chan(iface, msg);
+	return UBUS_STATUS_INVALID_ARGUMENT;
+}
+enum {
+	CSA_LIST,
+	CSA_LIST_BCN_COUNT,
+	CSA_LIST_BLOCK_TX,
+	CSA_LIST_FAST,
+	CSA_LIST_ALLOW_ACS,
+	__CSA_LIST_MAX,
+};
+static const struct blobmsg_policy csa_list_policy[__CSA_LIST_MAX] = {
+	[CSA_LIST] = { "list", BLOBMSG_TYPE_ARRAY },
+	[CSA_LIST_BCN_COUNT] = { "bcn_count", BLOBMSG_TYPE_INT32 },
+	[CSA_LIST_BLOCK_TX] = { "block_tx", BLOBMSG_TYPE_BOOL },
+	[CSA_LIST_FAST] = { "fast", BLOBMSG_TYPE_BOOL },
+	[CSA_LIST_ALLOW_ACS] = { "allow_acs", BLOBMSG_TYPE_BOOL },
+};
+
+static int
+hostapd_switch_chan_list(struct hostapd_iface *iface, struct blob_attr *msg)
+{
+	struct blob_attr *tb_l[__CSA_LIST_MAX];
+	struct blob_attr *tb[__CSA_MAX];
+	struct blob_attr *cur;
+	struct hostapd_freq_params old;
+	struct wpa_freq_range_list old_ch_list;
+	int old_acs;
+	int cs_count = 5, block_tx = 0, fast = 0, acs = 0;
+	int disabled = iface->state == HAPD_IFACE_DISABLED;
+	int rem;
+	int err = UBUS_STATUS_OK;
+
+	blobmsg_parse(csa_list_policy, __CSA_LIST_MAX, tb_l,
+			blob_data(msg), blob_len(msg));
+
+	if (!tb_l[CSA_LIST])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	hostapd_set_curr_freq_params(iface, &old, &old_acs, &old_ch_list);
+
+	if (tb_l[CSA_LIST_BCN_COUNT])
+		cs_count = blobmsg_get_u32(tb_l[CSA_LIST_BCN_COUNT]);
+	if (tb_l[CSA_LIST_BLOCK_TX])
+		block_tx = blobmsg_get_bool(tb_l[CSA_LIST_BCN_COUNT]);
+	if (tb_l[CSA_LIST_FAST])
+		fast = blobmsg_get_bool(tb_l[CSA_LIST_FAST]);
+	if (tb_l[CSA_LIST_ALLOW_ACS])
+		acs = blobmsg_get_bool(tb_l[CSA_LIST_ALLOW_ACS]);
+
+	blobmsg_for_each_attr(cur, tb_l[CSA_LIST], rem) {
+		blobmsg_parse(csa_policy, __CSA_MAX, tb, blobmsg_data(cur),
+				blobmsg_data_len(cur));
+		err = hostapd_do_switch_chan(iface, tb, &old, cs_count, block_tx, fast,
+				acs, &disabled);
+		if (!err)
+			goto result;
+	}
+
+	if (err < 0)
+		err = UBUS_STATUS_NOT_SUPPORTED;
+	if (!disabled)
+		goto result;
+
+	hostapd_iface_try_channel_fallback_fp(iface, &old, old_acs, &old_ch_list,
+			&disabled, 1);
+result:
+	os_free(old_ch_list.range);
+	return err;
+}
+static int
+hostapd_iface_switch_chan_list(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct hostapd_iface *iface = container_of(obj, struct hostapd_iface,
+			ubus.obj);
+	if (iface && iface->bss[0])
+		return hostapd_switch_chan_list(iface, msg);
 	return UBUS_STATUS_INVALID_ARGUMENT;
 }
 #endif
@@ -240,6 +681,8 @@ static const struct ubus_method iface_methods[] = {
 	UBUS_METHOD_NOARG("get_bss", hostapd_iface_get_bss),
 	#ifdef NEED_AP_MLME
 		UBUS_METHOD("switch_chan", hostapd_iface_switch_chan, csa_policy),
+		UBUS_METHOD("switch_chan_list", hostapd_iface_switch_chan_list,
+			csa_list_policy),
 	#endif
 };
 static struct ubus_object_type iface_object_type =
@@ -964,7 +1407,17 @@ hostapd_bss_switch_chan(struct ubus_context *ctx, struct ubus_object *obj,
 	struct hostapd_data *hapd = get_hapd_from_object(obj);
 
 	if (hapd)
-		return hostapd_switch_chan(hapd, msg);
+		return hostapd_switch_chan(hapd->iface, msg);
+	return UBUS_STATUS_INVALID_ARGUMENT;
+}
+static int
+hostapd_bss_switch_chan_list(struct ubus_context *ctx, struct ubus_object *obj,
+			struct ubus_request_data *req, const char *method,
+			struct blob_attr *msg)
+{
+	struct hostapd_data *hapd = get_hapd_from_object(obj);
+	if (hapd)
+		return hostapd_switch_chan_list(hapd->iface, msg);
 	return UBUS_STATUS_INVALID_ARGUMENT;
 }
 #endif
@@ -1746,6 +2199,7 @@ static const struct ubus_method bss_methods[] = {
 	UBUS_METHOD_NOARG("get_features", hostapd_bss_get_features),
 #ifdef NEED_AP_MLME
 	UBUS_METHOD("switch_chan", hostapd_bss_switch_chan, csa_policy),
+	UBUS_METHOD("switch_chan_list", hostapd_bss_switch_chan_list, csa_list_policy),
 #endif
 	UBUS_METHOD("set_vendor_elements", hostapd_vendor_elements, ve_policy),
 	UBUS_METHOD("notify_response", hostapd_notify_response, notify_policy),
