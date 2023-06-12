@@ -224,7 +224,15 @@
  
  	sta = ap_get_sta(hapd, mgmt->sa);
  	if (sta == NULL) {
-@@ -5920,6 +5953,8 @@ static void handle_deauth(struct hostapd
+@@ -5870,6 +5903,7 @@ static void handle_disassoc(struct hosta
+ 	ieee802_1x_notify_port_enabled(sta->eapol_sm, 0);
+ 	/* Stop Accounting and IEEE 802.1X sessions, but leave the STA
+ 	 * authenticated. */
++	hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 	accounting_sta_stop(hapd, sta);
+ 	ieee802_1x_free_station(hapd, sta);
+ 	if (sta->ipaddr)
+@@ -5920,6 +5954,8 @@ static void handle_deauth(struct hostapd
  	/* Clear the PTKSA cache entries for PASN */
  	ptksa_cache_flush(hapd->ptksa, mgmt->sa, WPA_CIPHER_NONE);
  
@@ -233,6 +241,14 @@
  	sta = ap_get_sta(hapd, mgmt->sa);
  	if (sta == NULL) {
  		wpa_msg(hapd->msg_ctx, MSG_DEBUG, "Station " MACSTR " trying "
+@@ -6458,6 +6494,7 @@ static void handle_assoc_cb(struct hosta
+ 	/* Stop previous accounting session, if one is started, and allocate
+ 	 * new session id for the new session. */
+ 	accounting_sta_stop(hapd, sta);
++	hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 
+ 	hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
+ 		       HOSTAPD_LEVEL_INFO,
 --- a/src/ap/beacon.c
 +++ b/src/ap/beacon.c
 @@ -852,6 +852,12 @@ void handle_probe_req(struct hostapd_dat
@@ -275,7 +291,15 @@
  
  	if (addr == NULL) {
  		/*
-@@ -237,6 +241,12 @@ int hostapd_notif_assoc(struct hostapd_d
+@@ -205,6 +209,7 @@ int hostapd_notif_assoc(struct hostapd_d
+ 	sta = ap_get_sta(hapd, addr);
+ 	if (sta) {
+ 		ap_sta_no_session_timeout(hapd, sta);
++		hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 		accounting_sta_stop(hapd, sta);
+ 
+ 		/*
+@@ -237,6 +242,12 @@ int hostapd_notif_assoc(struct hostapd_d
  		goto fail;
  	}
  
@@ -288,9 +312,25 @@
  #ifdef CONFIG_P2P
  	if (elems.p2p) {
  		wpabuf_free(sta->p2p_ie);
+@@ -1812,6 +1823,7 @@ static int hostapd_notif_update_dh_ie(st
+ 	sta = ap_get_sta(hapd, peer);
+ 	if (sta) {
+ 		ap_sta_no_session_timeout(hapd, sta);
++		hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 		accounting_sta_stop(hapd, sta);
+ 
+ 		/*
 --- a/src/ap/sta_info.c
 +++ b/src/ap/sta_info.c
-@@ -458,6 +458,7 @@ void ap_handle_timer(void *eloop_ctx, vo
+@@ -191,6 +191,7 @@ void ap_free_sta(struct hostapd_data *ha
+ {
+ 	int set_beacon = 0;
+ 
++	hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 	accounting_sta_stop(hapd, sta);
+ 
+ 	/* just in case */
+@@ -458,6 +459,7 @@ void ap_handle_timer(void *eloop_ctx, vo
  		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
  			       HOSTAPD_LEVEL_INFO, "deauthenticated due to "
  			       "local deauth request");
@@ -298,7 +338,15 @@
  		ap_free_sta(hapd, sta);
  		return;
  	}
-@@ -613,6 +614,7 @@ skip_poll:
+@@ -586,6 +588,7 @@ skip_poll:
+ 		if (!sta->acct_terminate_cause)
+ 			sta->acct_terminate_cause =
+ 				RADIUS_ACCT_TERMINATE_CAUSE_IDLE_TIMEOUT;
++		hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 		accounting_sta_stop(hapd, sta);
+ 		ieee802_1x_free_station(hapd, sta);
+ 		hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE80211,
+@@ -613,6 +616,7 @@ skip_poll:
  		mlme_deauthenticate_indication(
  			hapd, sta,
  			WLAN_REASON_PREV_AUTH_NOT_VALID);
@@ -306,7 +354,23 @@
  		ap_free_sta(hapd, sta);
  		break;
  	}
-@@ -1329,6 +1331,7 @@ void ap_sta_set_authorized(struct hostap
+@@ -859,6 +863,7 @@ void ap_sta_disassociate(struct hostapd_
+ 	eloop_cancel_timeout(ap_handle_timer, hapd, sta);
+ 	eloop_register_timeout(AP_MAX_INACTIVITY_AFTER_DISASSOC, 0,
+ 			       ap_handle_timer, hapd, sta);
++	hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 	accounting_sta_stop(hapd, sta);
+ 	ieee802_1x_free_station(hapd, sta);
+ 	wpa_auth_sta_deinit(sta->wpa_sm);
+@@ -911,6 +916,7 @@ void ap_sta_deauthenticate(struct hostap
+ 	eloop_cancel_timeout(ap_handle_timer, hapd, sta);
+ 	eloop_register_timeout(AP_MAX_INACTIVITY_AFTER_DEAUTH, 0,
+ 			       ap_handle_timer, hapd, sta);
++	hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 	accounting_sta_stop(hapd, sta);
+ 	ieee802_1x_free_station(hapd, sta);
+ 
+@@ -1329,6 +1335,7 @@ void ap_sta_set_authorized(struct hostap
  					  buf, ip_addr, keyid_buf);
  	} else {
  		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_DISCONNECTED "%s", buf);
@@ -621,7 +685,24 @@
  }
 --- a/hostapd/config_file.c
 +++ b/hostapd/config_file.c
-@@ -2861,6 +2861,12 @@ static int hostapd_config_fill(struct ho
+@@ -1644,6 +1644,7 @@ static int parse_anqp_elem(struct hostap
+ 	return 0;
+ }
+ 
++#endif /* CONFIG_INTERWORKING */
+ 
+ static int parse_qos_map_set(struct hostapd_bss_config *bss,
+ 			     char *buf, int line)
+@@ -1685,8 +1686,6 @@ static int parse_qos_map_set(struct host
+ 	return 0;
+ }
+ 
+-#endif /* CONFIG_INTERWORKING */
+-
+ 
+ #ifdef CONFIG_HS20
+ static int hs20_parse_conn_capab(struct hostapd_bss_config *bss, char *buf,
+@@ -2861,6 +2860,14 @@ static int hostapd_config_fill(struct ho
  		   0) {
  		bss->radius_das_require_message_authenticator = atoi(pos);
  #endif /* CONFIG_NO_RADIUS */
@@ -630,6 +711,8 @@
 +	} else if (os_strcmp(buf, "uci_device") == 0) {
 +		os_free(bss->uci_device);
 +		bss->uci_device = os_strdup(pos);
++	} else if (os_strcmp(buf, "ubus_acct_interim_interval") == 0) {
++		bss->acct_interim_interval = atoi(pos);
 +#endif /* UBUS_SUPPORT */
  	} else if (os_strcmp(buf, "auth_algs") == 0) {
  		bss->auth_algs = atoi(pos);
@@ -646,11 +729,98 @@
  	wpabuf_free(conf->wps_application_ext);
 --- a/src/ap/ap_config.h
 +++ b/src/ap/ap_config.h
-@@ -514,6 +514,7 @@ struct hostapd_bss_config {
+@@ -514,6 +514,8 @@ struct hostapd_bss_config {
  #endif /* CONFIG_WPS */
  	int pbc_in_m1;
  	char *server_id;
 +	char *uci_device;
++	int ubus_acct_interim_interval;
  
  #define P2P_ENABLED BIT(0)
  #define P2P_GROUP_OWNER BIT(1)
+--- a/src/ap/accounting.c
++++ b/src/ap/accounting.c
+@@ -167,7 +167,7 @@ static struct radius_msg * accounting_ms
+ }
+ 
+ 
+-static int accounting_sta_update_stats(struct hostapd_data *hapd,
++int accounting_sta_update_stats(struct hostapd_data *hapd,
+ 				       struct sta_info *sta,
+ 				       struct hostap_sta_driver_data *data)
+ {
+--- a/src/ap/accounting.h
++++ b/src/ap/accounting.h
+@@ -10,11 +10,6 @@
+ #define ACCOUNTING_H
+ 
+ #ifdef CONFIG_NO_ACCOUNTING
+-static inline int accounting_sta_get_id(struct hostapd_data *hapd,
+-					struct sta_info *sta)
+-{
+-	return 0;
+-}
+ 
+ static inline void accounting_sta_start(struct hostapd_data *hapd,
+ 					struct sta_info *sta)
+@@ -22,7 +17,7 @@ static inline void accounting_sta_start(
+ }
+ 
+ static inline void accounting_sta_stop(struct hostapd_data *hapd,
+-				       struct sta_info *sta)
++					struct sta_info *sta)
+ {
+ }
+ 
+@@ -35,11 +30,32 @@ static inline void accounting_deinit(str
+ {
+ }
+ #else /* CONFIG_NO_ACCOUNTING */
+-int accounting_sta_get_id(struct hostapd_data *hapd, struct sta_info *sta);
+ void accounting_sta_start(struct hostapd_data *hapd, struct sta_info *sta);
+ void accounting_sta_stop(struct hostapd_data *hapd, struct sta_info *sta);
+ int accounting_init(struct hostapd_data *hapd);
+ void accounting_deinit(struct hostapd_data *hapd);
+ #endif /* CONFIG_NO_ACCOUNTING */
+ 
++#if defined (CONFIG_NO_ACCOUNTING ) && !defined (UBUS_SUPPORT)
++static inline int accounting_sta_get_id(struct hostapd_data *hapd,
++					struct sta_info *sta)
++{
++	return 0;
++}
++static int accounting_sta_update_stats(struct hostapd_data *hapd,
++					struct sta_info *sta,
++					struct hostap_sta_driver_data *data)
++{
++	return 0;
++}
++
++#else
++
++int accounting_sta_get_id(struct hostapd_data *hapd, struct sta_info *sta);
++int accounting_sta_update_stats(struct hostapd_data *hapd,
++					struct sta_info *sta,
++					struct hostap_sta_driver_data *data);
++
++#endif /* CONFIG_NO_ACCOUNTING && UBUS_SUPPORT */
++
+ #endif /* ACCOUNTING_H */
+--- a/src/ap/ieee802_1x.c
++++ b/src/ap/ieee802_1x.c
+@@ -133,6 +133,7 @@ void ieee802_1x_set_sta_authorized(struc
+ 	if (authorized) {
+ 		os_get_reltime(&sta->connected_time);
+ 		accounting_sta_start(hapd, sta);
++		hostapd_ubus_event_sta_account_start(hapd,sta);
+ 	}
+ }
+ 
+@@ -1179,6 +1180,7 @@ void ieee802_1x_receive(struct hostapd_d
+ 			       "received EAPOL-Logoff from STA");
+ 		sta->acct_terminate_cause =
+ 			RADIUS_ACCT_TERMINATE_CAUSE_USER_REQUEST;
++		hostapd_ubus_event_sta_account_stop(hapd, sta);
+ 		accounting_sta_stop(hapd, sta);
+ 		sta->eapol_sm->eapolLogoff = true;
+ 		sta->eapol_sm->dot1xAuthEapolLogoffFramesRx++;

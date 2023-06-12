@@ -19,11 +19,15 @@
 #include "ubus.h"
 #include "ap_drv_ops.h"
 #include "beacon.h"
+#include "accounting.h"
+#include "radius/radius.h"
 #include "rrm.h"
 #include "wnm_ap.h"
 #include "taxonomy.h"
 #include "airtime_policy.h"
 #include "hw_features.h"
+
+#define ACCT_DEFAULT_UPDATE_INTERVAL 300
 
 static struct ubus_context *ctx;
 static struct blob_buf b;
@@ -1813,6 +1817,21 @@ static int avl_compare_macaddr(const void *k1, const void *k2, void *ptr)
 	return memcmp(k1, k2, ETH_ALEN);
 }
 
+static void hostapd_ubus_accounting_interim_update(void *eloop_ctx,	void *);
+static bool hostapd_ubus_accounting_init(struct hostapd_data *hapd)
+{
+	int interval = hapd->conf->acct_interim_interval;
+	if (!interval)
+		interval = ACCT_DEFAULT_UPDATE_INTERVAL;
+	eloop_register_timeout(interval, 0, hostapd_ubus_accounting_interim_update,
+			hapd, NULL);
+	return true;
+}
+static void hostapd_ubus_accounting_stop(struct hostapd_data *hapd)
+{
+	eloop_cancel_timeout(hostapd_ubus_accounting_interim_update, hapd, NULL);
+}
+
 void hostapd_ubus_add_bss(struct hostapd_data *hapd)
 {
 	struct ubus_object *obj = &hapd->ubus.obj;
@@ -1827,7 +1846,14 @@ void hostapd_ubus_add_bss(struct hostapd_data *hapd)
 	if (!hostapd_ubus_init())
 		return;
 
+	if (obj->id) {
+		return;
+	}
+
 	if (asprintf(&name, "hostapd.%s", hapd->conf->iface) < 0)
+		return;
+
+	if (!hostapd_ubus_accounting_init(hapd))
 		return;
 
 	avl_init(&hapd->ubus.banned, avl_compare_macaddr, false, NULL);
@@ -1855,6 +1881,7 @@ void hostapd_ubus_free_bss(struct hostapd_data *hapd)
 		return;
 
 	hostapd_send_shared_event(&hapd->iface->interfaces->ubus, hapd->conf->iface, "remove");
+	hostapd_ubus_accounting_stop(hapd);
 
 	if (obj->id) {
 		ubus_remove_object(ctx, obj);
@@ -2121,6 +2148,213 @@ void hostapd_ubus_event_iface_state(struct hostapd_iface *iface, int s)
 	blobmsg_add_string(&b, "state", hostapd_state_text(s));
 	ubus_send_event(ctx, "hostapd.iface_state", b.head);
 }
+
+static void
+blobmsg_add_sta_data(struct blob_buf *buf, const char *name,
+		struct sta_info *sta,
+		const struct hostap_sta_driver_data *data)
+{
+	u64 bytes;
+	void *tbl = blobmsg_open_table(buf, name);
+
+	blobmsg_add_u32(buf, "rx_packets", data->rx_packets);
+	blobmsg_add_u32(buf, "tx_packets", data->tx_packets);
+
+	if (data->bytes_64bit)
+		bytes = data->rx_bytes;
+	else
+		bytes = ((u64) sta->last_rx_bytes_hi << 32) |
+			sta->last_rx_bytes_lo;
+	blobmsg_add_u64(buf, "rx_bytes", bytes);
+	if (data->bytes_64bit)
+		bytes = data->tx_bytes;
+	else
+		bytes = ((u64) sta->last_tx_bytes_hi << 32) |
+			sta->last_tx_bytes_lo;
+	blobmsg_add_u64(buf, "tx_bytes", bytes);
+	blobmsg_add_double(buf, "rssi", data->last_ack_rssi);
+	blobmsg_add_double(buf, "signal", data->signal);
+
+	blobmsg_close_table(buf, tbl);
+}
+static void
+blobmsg_add_reltime(struct blob_buf *buf, const char *name,
+		const struct os_reltime *reltime)
+{
+	blobmsg_add_u32(buf, name, reltime->sec);
+}
+static void
+blobmsg_add_session_id(struct blob_buf *buf, const char *name,
+		struct sta_info *sta)
+{
+	blobmsg_printf(buf, name, "%016llX",
+			(unsigned long long) sta->acct_session_id);
+}
+static void
+blobmsg_add_station_accounting(struct blob_buf *buf,
+		const char *name,
+		struct sta_info *sta,
+		const struct hostap_sta_driver_data *data,
+		const struct os_reltime *session_time,
+		int cause)
+{
+	void *tbl = blobmsg_open_table(buf, name);
+	blobmsg_add_macaddr(buf, "address", sta->addr);
+	blobmsg_add_session_id(buf, "session_id", sta);
+	if(data)
+		blobmsg_add_sta_data(buf, "accounting", sta, data);
+	if(session_time)
+		blobmsg_add_reltime(buf, "session_time", session_time);
+	if (sta->identity)
+		blobmsg_add_string(buf, "identity", sta->identity);
+	if (cause > 0)
+		blobmsg_add_u32(buf, "terminate_cause", cause);
+	blobmsg_close_table(buf, tbl);
+}
+static void hostapd_ubus_event_sta_account(struct hostapd_data *hapd,
+		struct sta_info *sta, const char *status,
+		const struct hostap_sta_driver_data *data,
+		const struct os_reltime *session_time,
+		int cause)
+{
+	void *arr;
+
+	if (!ctx)
+		return;
+	blob_buf_init(&b, 0);
+
+	arr = blobmsg_open_array(&b, "clients");
+	blobmsg_add_station_accounting(&b, NULL, sta, data, session_time, cause);
+	blobmsg_close_array(&b, arr);
+	blobmsg_add_u32(&b, "freq", hapd->iface->freq);
+
+	blobmsg_add_hapd_id(&b, hapd);
+	ubus_notify(ctx, &hapd->ubus.obj, status, b.head, -1);
+}
+void hostapd_ubus_event_sta_account_start(struct hostapd_data *hapd,
+		struct sta_info *sta)
+{
+	if (sta->acct_session_started || !hapd->ubus.obj.has_subscribers)
+		return;
+#ifdef CONFIG_NO_ACCOUNTING
+	os_get_reltime(&sta->acct_session_start);
+	sta->last_rx_bytes_hi = 0;
+	sta->last_rx_bytes_lo = 0;
+	sta->last_tx_bytes_hi = 0;
+	sta->last_tx_bytes_lo = 0;
+	hostapd_drv_sta_clear_stats(hapd, sta->addr);
+#endif
+	sta->acct_session_started = 1;
+	hostapd_ubus_event_sta_account(hapd, sta, "start", NULL, NULL, 0);
+}
+void hostapd_ubus_event_sta_account_stop(struct hostapd_data *hapd,
+		struct sta_info *sta)
+{
+	struct hostap_sta_driver_data data, *pdata = NULL;
+	struct os_reltime now_r, diff;
+	int cause = sta->acct_terminate_cause;
+
+	if (!sta->acct_session_started || !hapd->ubus.obj.has_subscribers)
+		return;
+	sta->acct_session_started = 0;
+	if (!ctx)
+		return;
+	if (eloop_terminated())
+		cause = RADIUS_ACCT_TERMINATE_CAUSE_ADMIN_REBOOT;
+	os_get_reltime(&now_r);
+	os_reltime_sub(&now_r, &sta->acct_session_start, &diff);
+	if (accounting_sta_update_stats(hapd, sta, &data) == 0)
+		pdata = &data;
+	hostapd_ubus_event_sta_account(hapd, sta, "stop", pdata, &diff, cause);
+}
+struct ubus_sta_acct_counter {
+	struct blob_buf *buf;
+	int counter;
+	struct os_reltime now;
+};
+static int hostapd_ubus_event_sta_account_interim(struct hostapd_data *hapd,
+		struct sta_info *sta, void *ctx)
+{
+	struct ubus_sta_acct_counter *counter = ctx;
+	struct os_reltime diff;
+	struct hostap_sta_driver_data data, *pdata = NULL;
+
+	if (!sta->acct_session_started)
+		return 0;
+	os_reltime_sub(&counter->now, &sta->acct_session_start, &diff);
+	if (accounting_sta_update_stats(hapd, sta, &data) == 0)
+		pdata = &data;
+	blobmsg_add_station_accounting(counter->buf, NULL, sta, pdata, &diff, 0);
+	++counter->counter;
+}
+static void hostapd_ubus_accounting_interim(struct hostapd_data *hapd,
+		struct sta_info *sta)
+{
+	struct ubus_sta_acct_counter counter = { &b, 0 };
+	void *arr;
+
+	if (!hapd->ubus.obj.has_subscribers)
+		return;
+	blob_buf_init(&b, 0);
+
+	os_get_reltime(&counter.now);
+	blobmsg_add_u32(&b, "freq", hapd->iface->freq);
+	blobmsg_add_hapd_id(&b, hapd);
+	arr = blobmsg_open_array(&b, "clients");
+
+	if (sta != NULL)
+		hostapd_ubus_event_sta_account_interim(hapd, sta, &counter);
+	else
+		ap_for_each_sta(hapd, hostapd_ubus_event_sta_account_interim, &counter);
+	blobmsg_close_array(&b, arr);
+	if (counter.counter > 0)
+		ubus_notify(ctx, &hapd->ubus.obj, "interim", b.head, -1);
+}
+static void hostapd_ubus_accounting_interim_update(void *eloop_ctx,
+		void *timer_ctx)
+{
+	struct hostapd_data *hapd = eloop_ctx;
+	hostapd_ubus_accounting_interim(hapd, NULL);
+	hostapd_ubus_accounting_init(hapd);
+}
+
+#ifdef CONFIG_NO_ACCOUNTING
+int accounting_sta_update_stats(struct hostapd_data *hapd,
+					   struct sta_info *sta,
+					   struct hostap_sta_driver_data *data)
+{
+	if (hostapd_drv_read_sta_data(hapd, data, sta->addr))
+		return -1;
+
+	if (!data->bytes_64bit) {
+		/* Extend 32-bit counters from the driver to 64-bit counters */
+		if (sta->last_rx_bytes_lo > data->rx_bytes)
+			sta->last_rx_bytes_hi++;
+		sta->last_rx_bytes_lo = data->rx_bytes;
+
+		if (sta->last_tx_bytes_lo > data->tx_bytes)
+			sta->last_tx_bytes_hi++;
+		sta->last_tx_bytes_lo = data->tx_bytes;
+	}
+
+	hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_RADIUS,
+			   HOSTAPD_LEVEL_DEBUG,
+			   "updated TX/RX stats: rx_bytes=%llu [%u:%u] tx_bytes=%llu [%u:%u] bytes_64bit=%d",
+			   data->rx_bytes, sta->last_rx_bytes_hi,
+			   sta->last_rx_bytes_lo,
+			   data->tx_bytes, sta->last_tx_bytes_hi,
+			   sta->last_tx_bytes_lo,
+			   data->bytes_64bit);
+
+	return 0;
+}
+int accounting_sta_get_id(struct hostapd_data *hapd, struct sta_info *sta)
+{
+	/* Copied from radius_gen_session_id */
+	return os_get_random((u8 *) &sta->acct_session_id,
+			sizeof(sta->acct_session_id));
+}
+#endif
 
 void hostapd_ubus_notify_radar_detected(struct hostapd_iface *iface, int frequency,
 					int chan_width, int cf1, int cf2)
