@@ -10,6 +10,7 @@
 #include "utils/common.h"
 #include "utils/eloop.h"
 #include "utils/wpabuf.h"
+#include "utils/ubus_debug.h"
 #include "common/ieee802_11_defs.h"
 #include "common/hw_features_common.h"
 #include "hostapd.h"
@@ -83,7 +84,7 @@ static bool hostapd_ubus_init(void)
 
 	ctx->connection_lost = hostapd_ubus_connection_lost;
 	eloop_register_read_sock(ctx->sock.fd, ubus_receive, ctx, NULL);
-
+	wpa_ubus_error_init();
 
 	return true;
 }
@@ -151,6 +152,8 @@ hostapd_iface_get_bss(struct ubus_context *ctx, struct ubus_object *obj,
 		blobmsg_add_string(&b, "state", state);
 		if (bss->conf->uci_device)
 			blobmsg_add_string(&b, "device", bss->conf->uci_device);
+		if (bss->conf->uci_uuid)
+					blobmsg_add_string(&b, "uuid", bss->conf->uci_uuid);
 		if (bss->ubus.obj.id)
 			blobmsg_add_string(&b, "uobject", bss->ubus.obj.name);
 		blobmsg_close_table(&b, h);
@@ -2489,6 +2492,8 @@ ubus_event_cb(struct ubus_notify_request *req, int idx, int ret)
 
 static void blobmsg_add_hapd_id(struct blob_buf *buf, struct hostapd_data *hapd)
 {
+	if (hapd->conf->uci_uuid)
+		blobmsg_add_string(buf, "uuid", hapd->conf->uci_uuid);
 	if (hapd->conf->uci_device)
 		blobmsg_add_string(buf, "device", hapd->conf->uci_device);
 	blobmsg_add_macaddr(buf, "bssid", hapd->own_addr);
@@ -2679,6 +2684,7 @@ void hostapd_ubus_notify_beacon_report(
 void hostapd_ubus_event_iface_state(struct hostapd_iface *iface, int s)
 {
 	struct hostapd_data *hapd = iface->bss[0];
+	struct blob_buf *buf;
 
 	if (!hostapd_ubus_init())
 		return;
@@ -2691,14 +2697,19 @@ void hostapd_ubus_event_iface_state(struct hostapd_iface *iface, int s)
 		return;
 	}
 
-	blob_buf_init(&b, 0);
+	wpa_ubus_error_reset(iface->state > HAPD_IFACE_DISABLED &&
+			iface->state < HAPD_IFACE_ENABLED &&
+			s <= HAPD_IFACE_DISABLED);
+	wpa_ubus_error_close();
+	buf = wpa_ubus_error_blob();
+
 	if (hapd && hapd->conf->uci_device)
-		blobmsg_add_string(&b, "device", hapd->conf->uci_device);
+		blobmsg_add_string(buf, "device", hapd->conf->uci_device);
 	if (iface->ubus.obj.id)
-		blobmsg_add_string(&b, "uobject", iface->ubus.obj.name);
-	blobmsg_add_iface_state(&b, iface, s, iface->state);
-	blobmsg_add_iface_channel(&b, iface);
-	ubus_send_event(ctx, "hostapd.iface_state", b.head);
+		blobmsg_add_string(buf, "uobject", iface->ubus.obj.name);
+	blobmsg_add_iface_state(buf, iface, s, iface->state);
+	blobmsg_add_iface_channel(buf, iface);
+	ubus_send_event(ctx, "hostapd.iface_state", buf->head);
 }
 
 void hostapd_ubus_event_ch_switch(struct hostapd_iface *iface)
@@ -2792,6 +2803,8 @@ static void hostapd_ubus_event_sta_account(struct hostapd_data *hapd,
 		return;
 	blob_buf_init(&b, 0);
 
+	blobmsg_add_string(&b, "type", status);
+
 	arr = blobmsg_open_array(&b, "clients");
 	blobmsg_add_station_accounting(&b, NULL, sta, data, session_time, cause);
 	blobmsg_close_array(&b, arr);
@@ -2867,6 +2880,7 @@ static void hostapd_ubus_accounting_interim(struct hostapd_data *hapd,
 	blob_buf_init(&b, 0);
 
 	os_get_reltime(&counter.now);
+	blobmsg_add_string(&b, "type", "interim");
 	blobmsg_add_u32(&b, "freq", hapd->iface->freq);
 	blobmsg_add_hapd_id(&b, hapd);
 	arr = blobmsg_open_array(&b, "clients");

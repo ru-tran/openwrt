@@ -251,6 +251,7 @@ hostapd_common_add_bss_config() {
 	config_add_boolean wds wmm uapsd hidden utf8_ssid
 
 	config_add_string device
+	config_add_string uuid
 
 	config_add_int maxassoc max_inactivity
 	config_add_boolean disassoc_low_ack isolate short_preamble skip_inactivity_poll
@@ -604,6 +605,7 @@ hostapd_set_bss_options() {
 		append bss_conf "ap_max_inactivity=$max_inactivity" "$N"
 	fi
 	[ -n "$device" ] && append bss_conf "uci_device=$device" "$N"
+	[ -n "$uuid" ] && append bss_conf "uci_uuid=$uuid" "$N"
 	[ -n "$ubus_acct_interval" ] && \
 	    append bss_conf "ubus_acct_interim_interval=$ubus_acct_interval" "$N"
 
