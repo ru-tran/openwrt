@@ -863,28 +863,28 @@
  		accounting_sta_stop(hapd, sta);
  		sta->eapol_sm->eapolLogoff = true;
  		sta->eapol_sm->dot1xAuthEapolLogoffFramesRx++;
---- a/src/utils/wpa_debug.c
-+++ b/src/utils/wpa_debug.c
-@@ -9,6 +9,7 @@
- #include "includes.h"
- 
- #include "common.h"
-+#include "ubus_debug.h"
- 
- #ifdef CONFIG_DEBUG_SYSLOG
- #include <syslog.h>
-@@ -217,6 +218,14 @@ void _wpa_printf(int level, const char *
- 				     ANDROID_LOG_NAME, fmt, ap);
- 		va_end(ap);
- #else /* CONFIG_ANDROID_LOG */
-+#ifdef UBUS_SUPPORT
-+		if (level >= MSG_ERROR) {
-+			va_list cap;
-+			va_copy(cap, ap);
-+			wpa_ubus_error_msg(fmt, cap);
-+			va_end(cap);
-+		}
-+#endif
- #ifdef CONFIG_DEBUG_SYSLOG
- 		if (wpa_debug_syslog) {
- 			va_start(ap, fmt);
+#--- a/src/utils/wpa_debug.c
+#+++ b/src/utils/wpa_debug.c
+#@@ -9,6 +9,7 @@
+# #include "includes.h"
+# 
+# #include "common.h"
+#+#include "ubus_debug.h"
+# 
+# #ifdef CONFIG_DEBUG_SYSLOG
+# #include <syslog.h>
+#@@ -217,6 +218,14 @@ void _wpa_printf(int level, const char *
+# 				     ANDROID_LOG_NAME, fmt, ap);
+# 		va_end(ap);
+# #else /* CONFIG_ANDROID_LOG */
+#+#ifdef UBUS_SUPPORT
+#+		if (level >= MSG_ERROR) {
+#+			va_list cap;
+#+			va_copy(cap, ap);
+#+			wpa_ubus_error_msg(fmt, cap);
+#+			va_end(cap);
+#+		}
+#+#endif
+# #ifdef CONFIG_DEBUG_SYSLOG
+# 		if (wpa_debug_syslog) {
+# 			va_start(ap, fmt);
