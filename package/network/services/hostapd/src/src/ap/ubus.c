@@ -333,7 +333,8 @@ static int hostapd_set_curr_freq_params(struct hostapd_iface *iface,
 		struct wpa_freq_range_list *ch_list)
 {
 	struct hostapd_config *conf = iface->conf;
-	struct he_capabilities *he_cap = NULL;
+	struct hostapd_hw_modes *mode;
+	mode = iface->current_mode;
 	memset(params, 0, sizeof(*params));
 	memset(ch_list, 0, sizeof(*ch_list));
 
@@ -344,13 +345,13 @@ static int hostapd_set_curr_freq_params(struct hostapd_iface *iface,
 				0,0, 
 				conf->ieee80211n,
 				conf->ieee80211ac,
-				0,
+				conf->ieee80211ax, // HE support
 				conf->secondary_channel,
 				conf->vht_oper_chwidth,
 				conf->vht_oper_centr_freq_seg0_idx,
 				conf->vht_oper_centr_freq_seg1_idx,
 				conf->vht_capab,
-				he_cap 
+				mode ? &mode->he_capab[IEEE80211_MODE_AP] : NULL
 			))
     {
             params->channel = 0;
@@ -388,6 +389,7 @@ hostapd_iface_try_channel(struct hostapd_iface *iface, struct hostapd_freq_param
 	int err = 1;
 	int chan, freq;
 	u8 center_idx0, center_idx1;
+	struct hostapd_hw_modes *mode;
 
 	memset(&css, 0, sizeof (css));
 	css.cs_count = cs_count;
@@ -404,6 +406,8 @@ hostapd_iface_try_channel(struct hostapd_iface *iface, struct hostapd_freq_param
 				sec_channel, vht_oper_chwidth, acs, disabled, 1);
 	}
 
+	mode = iface->current_mode;
+
 	for (i=0; i < ch_list->num; ++i) {
 		/*
 		 * Allow selection of DFS channel in ETSI to comply with
@@ -414,11 +418,21 @@ hostapd_iface_try_channel(struct hostapd_iface *iface, struct hostapd_freq_param
 		ubus_adjust_vht_center_freq(iface, chan, sec_channel, &vht_oper_chwidth,
 				ht, vht, &center_idx0, &center_idx1);
 
-		if (hostapd_set_freq_params(freq_params, iface->conf->hw_mode,
-					freq, chan,	0,0, ht, vht, 0, sec_channel, vht_oper_chwidth,
-					center_idx0, center_idx1,
-					iface->current_mode->vht_capab,
-					he_cap))
+		if (hostapd_set_freq_params(freq_params,
+				iface->conf->hw_mode,
+				freq,
+				chan,
+				0,0, // EDMG is not supported
+				ht,
+				vht,
+				iface->conf->ieee80211ax, // HE support
+				sec_channel,
+				vht_oper_chwidth,
+				center_idx0,
+				center_idx1,
+				iface->current_mode->vht_capab,
+				mode ? &mode->he_capab[IEEE80211_MODE_AP] : NULL
+			))
 		{
 			wpa_printf(MSG_WARNING, "Can not build channel freq=%d, chan=%d, "
 					"ht=%d, vht=%d, sec_channel=%d, vht_cwidth=%d, center0=%d, "
